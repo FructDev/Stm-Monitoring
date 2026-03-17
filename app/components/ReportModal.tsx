@@ -5,10 +5,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
-import { Download, FileText, Loader2, FileSpreadsheet } from 'lucide-react';
+import { Download, FileText, Loader2, FileSpreadsheet, Activity } from 'lucide-react';
 import { pdf } from '@react-pdf/renderer';
 import { saveAs } from 'file-saver';
 import * as XLSX from 'xlsx';
+import { getScbCapacity } from '@/app/lib/scb-config';
 
 // Asegúrate de que este componente exista o comenta la línea si no usas PDF aún
 import { ManagementReport } from '@/app/reports/ManagementReport';
@@ -50,25 +51,32 @@ export function ReportModal() {
 
             // 1. PROCESAMIENTO Y FILTRADO
             rawData.forEach((d: any) => {
-                // Inicializar contador de PS si no existe
-                if (!summaryMap[d.ps]) {
-                    summaryMap[d.ps] = { damagedStrings: 0, scbCount: 0, offlineCount: 0 };
+                // Generar clave única: PS + Inversor (Ej: "PS1 - Inv 1")
+                const key = `${d.ps} - Inv ${d.inversor}`;
+
+                // Inicializar contador si no existe
+                if (!summaryMap[key]) {
+                    summaryMap[key] = { damagedStrings: 0, scbCount: 0, offlineCount: 0 };
                 }
 
                 // Detectar strings muertos (< 0.5A)
-                // d.strings debe venir de la API como array [s01...s18]
-                const deadIndices = d.strings
+                // SOLO si la caja tiene amperaje suficiente (> 2A) para evitar falsos positivos
+                const hasAmps = (d.amps || 0) > 2;
+                const capacity = getScbCapacity(d.ps, d.inversor, d.scb);
+
+                const deadIndices = (d.strings && hasAmps)
                     ? d.strings
+                        .slice(0, capacity) // <-- FIX: Trim empty slots for 15-string inverters
                         .map((val: number, idx: number) => (val < 0.5 ? idx + 1 : null))
                         .filter((val: number) => val !== null)
                     : [];
 
-                const isOffline = d.status === 'OFFLINE' || d.status === 'READ_FAIL';
+                const isOffline = d.status === 'OFFLINE' || d.status === 'READ_FAIL' || d.status === 'FAIL';
                 const hasDeadStrings = deadIndices.length > 0;
 
                 // Solo nos interesan las cajas con problemas
                 if (isOffline || hasDeadStrings) {
-                    const stats = summaryMap[d.ps];
+                    const stats = summaryMap[key];
 
                     if (isOffline) {
                         stats.offlineCount += 1;
@@ -79,14 +87,14 @@ export function ReportModal() {
                     }
 
                     // Fila para la hoja de "Checklist Técnico"
+                    const displayScb = d.scb;
+
                     workOrderRows.push({
                         Prioridad: isOffline ? '🔴 ALTA (OFF)' : '🟡 MEDIA',
                         Ubicacion: d.ps,
-                        Equipo: `INV-${d.inversor} / SCB-${d.scb}`,
+                        Equipo: `INV-${d.inversor} / SCB-${displayScb}`,
                         Problema: isOffline ? 'Sin Comunicación' : `${deadIndices.length}`,
-                        // LA LISTA QUE PEDISTE: "1, 5, 7"
                         Strings_Afectados: isOffline ? 'Revisar Comms' : deadIndices.join(', '),
-                        // Casilla vacía para que el técnico marque con lapicero
                         Verificado: '[   ]'
                     });
                 }
@@ -94,13 +102,22 @@ export function ReportModal() {
 
             // 2. GENERAR HOJA 1: ESTRATEGIA (Resumen Gerencial)
             const strategyRows = Object.entries(summaryMap)
-                .map(([ps, data]) => ({
-                    Power_Station: ps,
-                    Cajas_Offline: data.offlineCount,
-                    Total_Strings_Dañados: data.damagedStrings,
-                    Cajas_Afectadas: data.scbCount
-                }))
-                .sort((a, b) => b.Total_Strings_Dañados - a.Total_Strings_Dañados); // Los peores primero
+                .map(([key, data]) => {
+                    const [ps, inv] = key.split(' - '); // "PS1", "Inv 1"
+                    return {
+                        Power_Station: ps,
+                        Inversor: inv, // Nueva Columna
+                        Cajas_Offline: data.offlineCount,
+                        Total_Strings_Dañados: data.damagedStrings,
+                        Cajas_Afectadas: data.scbCount
+                    };
+                })
+                .sort((a, b) => {
+                    const numA = parseInt(a.Power_Station.replace(/\D/g, '')) || 0;
+                    const numB = parseInt(b.Power_Station.replace(/\D/g, '')) || 0;
+                    if (numA !== numB) return numA - numB;
+                    return a.Inversor.localeCompare(b.Inversor);
+                }); // Ordenar por PS (1, 2, 3...) y luego Inversor
 
             // Agregar fila de Totales Globales
             const totalDamage = strategyRows.reduce((sum, row) => sum + row.Total_Strings_Dañados, 0);
@@ -108,7 +125,8 @@ export function ReportModal() {
             const totalBoxes = strategyRows.reduce((sum, row) => sum + row.Cajas_Afectadas, 0);
 
             strategyRows.push({
-                Power_Station: 'TOTAL PARQUE',
+                Power_Station: 'TOTAL',
+                Inversor: 'PARQUE',
                 Cajas_Offline: totalOffline,
                 Total_Strings_Dañados: totalDamage,
                 Cajas_Afectadas: totalBoxes
@@ -125,8 +143,8 @@ export function ReportModal() {
 
             // Hoja 1: Estrategia
             const wsStrategy = XLSX.utils.json_to_sheet(strategyRows);
-            // Ajustar ancho columnas
-            wsStrategy['!cols'] = [{ wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 15 }];
+            // Ajustar ancho columnas (Added Inversor col width)
+            wsStrategy['!cols'] = [{ wch: 15 }, { wch: 10 }, { wch: 15 }, { wch: 20 }, { wch: 15 }];
             XLSX.utils.book_append_sheet(wb, wsStrategy, "Resumen Estratégico");
 
             // Hoja 2: Orden de Trabajo (Checklist)
@@ -157,6 +175,108 @@ export function ReportModal() {
         } catch (e) {
             console.error(e);
             alert("Error generando la orden de trabajo. Verifica los datos.");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // --- GENERAR REPORTE AVANZADO (Fallas de Comunicación y Patrones) ---
+    const handleAdvancedReport = async () => {
+        setLoading(true);
+        try {
+            const rawData = await getData();
+
+            const commFailures: any[] = [];
+            const cardFailures: any[] = [];
+
+            rawData.forEach((d: any) => {
+                // 1. DETECCIÓN DE FALLO DE COMUNICACIÓN
+                const isOffline = d.status === 'OFFLINE' || d.status === 'READ_FAIL' || d.status === 'FAIL';
+
+                if (isOffline) {
+                    commFailures.push({
+                        Ubicacion: d.ps,
+                        Equipo: `INV-${d.inversor} / SCB-${d.scb}`,
+                        Estado: d.status,
+                        Ultima_Lectura: 'Hace > 15 min', // Estimado
+                        Prioridad: 'ALTA'
+                    });
+                }
+
+                // 2. DETECCIÓN DE PATRONES (Posible Fallo de Tarjeta)
+                // Buscamos 4 strings consecutivos dañados (ej. 1-4, 5-8...)
+                // Solo si la caja tiene corriente (> 2A) y no está offline
+                const hasAmps = (d.amps || 0) > 2;
+
+                if (!isOffline && hasAmps && d.strings) {
+                    const capacity = getScbCapacity(d.ps, d.inversor, d.scb);
+                    const strings = d.strings.slice(0, capacity); // <-- FIX: Only check valid strings
+
+                    // Iteramos buscando bloques de ceros consecutivos
+                    let consecutiveCount = 0;
+                    let startIdx = -1;
+                    const damagedBlocks: string[] = [];
+
+                    for (let i = 0; i < strings.length; i++) {
+                        const val = strings[i];
+                        if (val < 0.5) {
+                            if (consecutiveCount === 0) startIdx = i;
+                            consecutiveCount++;
+                        } else {
+                            if (consecutiveCount >= 4) {
+                                damagedBlocks.push(`Strings ${startIdx + 1}-${startIdx + consecutiveCount}`);
+                            }
+                            consecutiveCount = 0;
+                        }
+                    }
+                    // Check final block
+                    if (consecutiveCount >= 4) {
+                        damagedBlocks.push(`Strings ${startIdx + 1}-${startIdx + consecutiveCount}`);
+                    }
+
+                    if (damagedBlocks.length > 0) {
+                        cardFailures.push({
+                            Ubicacion: d.ps,
+                            Equipo: `INV-${d.inversor} / SCB-${d.scb}`,
+                            Corriente_Caja: `${d.amps.toFixed(1)} A`,
+                            Patron_Detectado: damagedBlocks.join(', '),
+                            Diagnostico: 'Posible Fallo de Tarjeta/Fusibles Multiples',
+                            Prioridad: 'MEDIA'
+                        });
+                    }
+                }
+            });
+
+            if (commFailures.length === 0 && cardFailures.length === 0) {
+                alert("No se detectaron fallos críticos ni patrones de tarjeta dañada.");
+                setLoading(false);
+                return;
+            }
+
+            // CREAR EXCEL
+            const wb = XLSX.utils.book_new();
+
+            // Hoja 1: Comunicación
+            if (commFailures.length > 0) {
+                const wsComm = XLSX.utils.json_to_sheet(commFailures);
+                wsComm['!cols'] = [{ wch: 10 }, { wch: 20 }, { wch: 15 }, { wch: 20 }, { wch: 10 }];
+                XLSX.utils.book_append_sheet(wb, wsComm, "Fallo Comunicacion");
+            }
+
+            // Hoja 2: Patrones Hardware
+            if (cardFailures.length > 0) {
+                const wsCard = XLSX.utils.json_to_sheet(cardFailures);
+                wsCard['!cols'] = [{ wch: 10 }, { wch: 20 }, { wch: 15 }, { wch: 40 }, { wch: 35 }, { wch: 10 }];
+                XLSX.utils.book_append_sheet(wb, wsCard, "Posible Fallo Tarjeta");
+            }
+
+            const fileName = `Diagnostico_Avanzado_${new Date().toISOString().slice(0, 10)}.xlsx`;
+            XLSX.writeFile(wb, fileName);
+            setIsOpen(false);
+
+        } catch (e) {
+            console.error(e);
+            alert("Error generando reporte avanzado.");
         } finally {
             setLoading(false);
         }
@@ -237,15 +357,25 @@ export function ReportModal() {
                     )}
                 </div>
 
-                <div className="flex gap-3 justify-end mt-2">
+                <div className="flex flex-col gap-3 mt-4">
                     <Button
                         variant="outline"
                         onClick={handleExcel}
                         disabled={loading}
-                        className="border-emerald-900 text-emerald-500 hover:bg-emerald-950 hover:text-emerald-400 w-full"
+                        className="border-emerald-600/50 text-emerald-500 hover:bg-emerald-950/30 hover:text-emerald-400 w-full h-12"
                     >
-                        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                        {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <FileSpreadsheet className="mr-2 h-5 w-5" />}
                         Descargar Orden de Trabajo (Excel)
+                    </Button>
+
+                    <Button
+                        variant="ghost"
+                        onClick={handleAdvancedReport}
+                        disabled={loading}
+                        className="text-slate-400 hover:text-white hover:bg-slate-800 w-full h-10 text-sm"
+                    >
+                        {loading ? <Loader2 className="h-3 w-3 animate-spin mr-2" /> : <Activity className="mr-2 h-4 w-4" />}
+                        Diagnóstico Avanzado (Offline + Tarjetas)
                     </Button>
                 </div>
             </DialogContent>

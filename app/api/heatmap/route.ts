@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const UMBRAL_SEGUNDOS = 36000000;
+    const UMBRAL_SEGUNDOS = 90000;
 
     // 1. CAMBIO: Usamos SELECT * para traer s01, s02... s18 y vdc
     const rawData = db
@@ -35,8 +35,10 @@ export async function GET() {
         return { ...row, estado: "OFFLINE", i_total: 0, performance: 0 };
       }
 
-      if (row.estado === "OK" && row.i_total > 0) {
-        globalSumAmps += row.i_total;
+      // Relaxed condition: Include any active inverter in average, not just "OK"
+      // This fixes the issue where "FAIL" or "ALERTA" statuses caused 0 Global Avg
+      if (row.estado !== "OFFLINE" && row.estado !== "READ_FAIL" && row.i_total > 0) {
+        globalSumAmps += (row.i_total / 100); // Fix: Scale to Amps
         activeCount++;
       }
 
@@ -48,8 +50,11 @@ export async function GET() {
     // Segunda pasada: Formatear para el Frontend
     const finalData = cells.map((cell: any) => {
       let performance = 0;
+      // Note: cell.i_total is still raw here, need to scale for performance calc against scaled globalAvg
+      const cellAmps = (cell.i_total ?? 0) / 100;
+
       if (cell.estado !== "OFFLINE" && globalAvg > 0) {
-        performance = (cell.i_total / globalAvg) * 100;
+        performance = (cellAmps / globalAvg) * 100;
       }
 
       // 2. CAMBIO: Empaquetar los 18 strings en un array limpio
@@ -73,16 +78,26 @@ export async function GET() {
         cell.s16,
         cell.s17,
         cell.s18,
-      ];
+      ].map(s => (s ?? 0) / 100); // Fix: Scale strings by 100
+
+      // 3. CAMBIO: DETECCIÓN DE INVERSOR REAL (SCB > 18 = INV 2)
+      // El backend reporta todo como Inv 1, pero sabemos que SCB 19-36 son Inv 2.
+      let finalInversor = cell.inversor;
+      let finalScb = cell.scb;
+
+      if (cell.scb > 18) {
+        finalInversor = 2;
+        finalScb = cell.scb; // Mantenemos el número original (19-36)
+      }
 
       return {
-        id: `${cell.power_station}-${cell.inversor}-${cell.scb}`,
+        id: `${cell.power_station}-${finalInversor}-${finalScb}`, // Update ID
         ps: cell.power_station,
-        inversor: cell.inversor,
-        scb: cell.scb,
-        amps: cell.i_total,
+        inversor: finalInversor, // Use corrected Inverter
+        scb: finalScb,           // Use corrected SCB Number
+        amps: cellAmps, // Return scaled amps
         vdc: cell.vdc, // Importante para diagnóstico
-        status: cell.estado,
+        status: cell.estado === 'FAIL' ? 'READ_FAIL' : cell.estado, // Fix: Normalize 'FAIL' to 'READ_FAIL'
         perf: performance,
         strings: stringValues, // <--- AQUÍ ESTÁ LA DATA PARA EL EXCEL
       };

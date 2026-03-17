@@ -12,9 +12,11 @@ import { StatsOverview } from "./components/dashboard/StatsOverview";
 import { PsGrid } from "./components/dashboard/PsGrid";
 import { ParkStats, PsSummary } from "./types";
 import { ReportModal } from "./components/ReportModal";
+import { AlarmBanner } from "@/components/alarms/alarm-banner";
+import { AlarmToastController } from "@/components/alarms/alarm-toast-controller";
 
 // 1. IMPORTAMOS EL HOOK DE ALERTAS
-import { useScadaAlerts } from "@/hooks/useScadaAlerts";
+// import { useScadaAlerts } from "@/hooks/useScadaAlerts";
 
 // Función para pedir datos al API
 const fetchStats = async () => {
@@ -45,7 +47,7 @@ export default function DashboardPage() {
 
   // 3. ACTIVAR EL SISTEMA DE ALERTAS
   // El hook monitorea cambios en esta lista y lanza el Toast si algo cambia de OK a ERROR
-  useScadaAlerts(flatDeviceList);
+  // useScadaAlerts(flatDeviceList); // Disable legacy alerts in favor of AlarmToastController
 
   if (isLoading) return <LoadingScreen />;
   if (error) return <ErrorScreen msg={error.message} />;
@@ -55,6 +57,8 @@ export default function DashboardPage() {
       <Header lastUpdate={data?.last_update} />
 
       <main className="container mx-auto px-4 py-8">
+        <AlarmBanner />
+
         {/* KPI CARDS */}
         {data && <StatsOverview stats={data} />}
 
@@ -98,6 +102,8 @@ export default function DashboardPage() {
 
         {/* GRID DE GATEWAYS */}
         {data && <PsGrid stations={data.stations} />}
+
+        <AlarmToastController />
       </main>
     </div>
   );

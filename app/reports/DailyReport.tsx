@@ -47,7 +47,7 @@ export const DailyReportPdf = ({ data, date }: ReportProps) => {
     const alertScbs = data.filter(d => d.estado.includes('FUSIBLE') || d.estado === 'BAJA_TENSION' || (d.i_total ?? 0) < 0.5);
 
     // Cálculo de Pérdidas (Simplificado para el reporte)
-    const totalAmps = data.reduce((acc, curr) => acc + (curr.i_total ?? 0), 0);
+    const totalAmps = data.reduce((acc, curr) => acc + ((curr.i_total ?? 0) / 100), 0);
     const avgVolts = 800; // Valor nominal aproximado si no hay lectura
     const totalPowerMW = (totalAmps * avgVolts) / 1000000;
 
@@ -124,7 +124,7 @@ export const DailyReportPdf = ({ data, date }: ReportProps) => {
                             {alertScbs.slice(0, 20).map((scb, i) => (
                                 <View key={i} style={styles.tableRow}>
                                     <View style={styles.tableCol}><Text style={styles.tableCell}>{scb.power_station} - Inv {scb.inversor} - #{scb.scb}</Text></View>
-                                    <View style={styles.tableCol}><Text style={styles.tableCell}>{(scb.i_total ?? 0).toFixed(1)} A</Text></View>
+                                    <View style={styles.tableCol}><Text style={styles.tableCell}>{((scb.i_total ?? 0) / 100).toFixed(1)} A</Text></View>
                                     <View style={styles.tableCol}><Text style={styles.tableCell}>{(scb.vdc ?? 0).toFixed(0)} V</Text></View>
                                     <View style={styles.tableCol}><Text style={styles.tableCell}>{scb.estado}</Text></View>
                                 </View>

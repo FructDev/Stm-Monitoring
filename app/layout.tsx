@@ -3,13 +3,13 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import Providers from "./providers";
-import { Toaster } from "sonner";
+
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Girasol SCADA",
-  description: "Sistema de Monitoreo Parque Solar Girasol",
+  title: "Girasol SCBs Monitoring",
+  description: "Sistema de Monitoreo de SCBs - Parque Solar Girasol",
 };
 
 export default function RootLayout({
@@ -24,7 +24,7 @@ export default function RootLayout({
         className={`${inter.className} bg-slate-950 text-slate-100 min-h-screen`}
       >
         <Providers>{children}</Providers>
-        <Toaster position="bottom-right" richColors expand={true} />
+
       </body>
     </html>
   );

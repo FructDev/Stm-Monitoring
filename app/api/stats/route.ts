@@ -2,12 +2,13 @@
 import { NextResponse } from "next/server";
 import db from "@/app/lib/db";
 import { PsSummary } from "@/app/types";
+import { getScbCapacity } from "@/app/lib/scb-config";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const UMBRAL_SEGUNDOS = 36000000; // 15 minutos
+    const UMBRAL_SEGUNDOS = 90000; // 15 minutos
 
     // 🔥 CAMBIO: Traemos TODAS las columnas (s01...s18) para analizar strings
     const rawData = db
@@ -70,14 +71,14 @@ export async function GET() {
 
       if (row.ts > ps.last_ts) ps.last_ts = row.ts;
 
-      if (isZombie || row.estado === "OFFLINE" || row.estado === "READ_FAIL") {
+      if (isZombie || row.estado === "OFFLINE" || row.estado === "READ_FAIL" || row.estado === "FAIL") {
         offline_scbs++;
         ps.offline_count++;
       } else {
         online_scbs++;
 
         // Sumar Amperaje Global
-        const amps = row.i_total || 0;
+        const amps = (row.i_total || 0) / 100; // Fix: Scale by 100
         total_amps += amps;
         ps.total_amps += amps;
 
@@ -95,11 +96,19 @@ export async function GET() {
         // 🔥 CÁLCULO DE STRINGS DAÑADOS
         // Solo contamos si la caja tiene corriente (> 2A) para evitar falsos positivos de noche
         if (amps > 2) {
+          // Determinar capacidad real (15 o 18)
+          // Importante: getScbCapacity maneja internamente la lógica de SCB > 18
+          const capacity = getScbCapacity(row.power_station, row.inversor, row.scb);
+
           let deadInBox = 0;
-          for (const key of stringKeys) {
-            const val = row[key];
+
+          // Solo iteramos hasta la capacidad real
+          for (let i = 0; i < capacity; i++) {
+            const key = `s${String(i + 1).padStart(2, "0")}`;
+            const val = (row[key] ?? 0) / 100; // Fix: Scale by 100
+
             // Si es menor a 0.5A, lo consideramos muerto (Fusible abierto)
-            if (val !== null && val < 0.5) {
+            if (val >= 0 && val < 0.5) {
               deadInBox++;
             }
           }
