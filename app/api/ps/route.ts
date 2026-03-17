@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/app/lib/db";
 
@@ -17,7 +16,6 @@ export async function GET(request: NextRequest) {
         `
       SELECT * FROM lecturas_live 
       WHERE power_station = ? 
-      ORDER BY inversor ASC, scb ASC
     `
       )
       .all(psName) as any[];
@@ -25,12 +23,42 @@ export async function GET(request: NextRequest) {
     const UMBRAL_SEGUNDOS = 36000000; // 15 Minutos
     const now = new Date().getTime();
 
-    const processedRows = rows.map((row) => {
-      // CORRECCIÓN: Parseamos la fecha tal cual viene de la DB (Hora Local)
-      // Sin agregarle 'Z' ni cosas raras.
+    // Deduplicación vital: 
+    // Como V1 insertó Inversor 1 con SCB 19-36 y V2 inserta directamente
+    // Inversor 2 con SCB 1-18, si aplicamos el mapeo ambos terminan en la misma URL física.
+    // Usamos un Hash Map para agrupar por (inversor-scb) físico y quedarnos solo con el más reciente.
+    const uniqueMap = new Map();
+
+    rows.forEach((row) => {
+      let mappedInversor = row.inversor;
+      let mappedScb = row.scb;
+      const normPs = String(row.power_station).replace(/\s+/g, '').toUpperCase();
+
+      if (mappedScb > 18) {
+        mappedInversor = 2; // Mapeo legado de V1
+        if (normPs === 'PS1') {
+          if (mappedScb >= 27 && mappedScb <= 36) mappedScb = mappedScb - 26;
+          else if (mappedScb >= 19 && mappedScb <= 26) mappedScb = mappedScb - 8;
+        } else {
+          mappedScb = mappedScb - 18;
+        }
+      }
+
+      const key = `${mappedInversor}-${mappedScb}`;
+      const existing = uniqueMap.get(key);
       const rowTime = new Date(row.ts).getTime();
 
-      // Calculamos diferencia
+      if (!existing || rowTime > new Date(existing.ts).getTime()) {
+        uniqueMap.set(key, {
+          ...row,
+          inversor: mappedInversor,
+          scb: mappedScb
+        });
+      }
+    });
+
+    const processedRows = Array.from(uniqueMap.values()).map((row) => {
+      const rowTime = new Date(row.ts).getTime();
       const secondsDiff = (now - rowTime) / 1000;
 
       // Si es zombie (> 15 min), forzamos OFFLINE visual
@@ -44,6 +72,12 @@ export async function GET(request: NextRequest) {
         };
       }
       return row;
+    });
+
+    // Sort manual ya que agrupar rompe el ORDER BY de SQL
+    processedRows.sort((a, b) => {
+      if (a.inversor !== b.inversor) return a.inversor - b.inversor;
+      return a.scb - b.scb;
     });
 
     return NextResponse.json(processedRows);

@@ -1,4 +1,5 @@
 import { ScbData } from "@/app/types";
+import { getScbCapacity } from "@/app/lib/scb-config";
 
 // Promedio de horas sol pico (Ajustable)
 const HORAS_SOL_PICO = 5.5;
@@ -18,15 +19,24 @@ export interface ScbAnalysis {
 
 export function analyzeScb(scb: ScbData): ScbAnalysis {
     // 1. Protección contra NULOS (Vital para evitar crashes)
-    const i_total = scb.i_total ?? 0;
+    const i_total = (scb.i_total ?? 0) / 100; // Fix: Scale by 100
     const vdc = scb.vdc ?? 0;
 
+    // Determinar capacidad real de la caja (15 o 18)
+    const capacity = getScbCapacity(scb.power_station, scb.inversor, scb.scb);
+
     // Extraer strings de forma segura
-    const currents = [
+    // Solo consideramos los strings hasta la capacidad definida
+    let currents = [
         scb.s01, scb.s02, scb.s03, scb.s04, scb.s05, scb.s06,
         scb.s07, scb.s08, scb.s09, scb.s10, scb.s11, scb.s12,
         scb.s13, scb.s14, scb.s15, scb.s16, scb.s17, scb.s18
-    ].map(val => val ?? 0); // Si es null, lo convierte a 0
+    ].map(val => (val ?? 0) / 100); // Si es null, lo convierte a 0 y divide por 100
+
+    // Si es de 15 strings, cortamos el array
+    if (capacity === 15) {
+        currents = currents.slice(0, 15);
+    }
 
     // 2. Determinar "Corriente Ideal" (Benchmark)
     // Usamos el promedio de los strings BUENOS de esta misma caja.
@@ -56,8 +66,8 @@ export function analyzeScb(scb: ScbData): ScbAnalysis {
     // 4. Cálculos de Potencia (P = V * I) / 1000 = kW
     const actualKW = (i_total * vdc) / 1000;
 
-    // Potencia Potencial: Si los 18 strings dieran el amperaje ideal
-    const potentialAmps = idealStringAmps * 18;
+    // Potencia Potencial: Si los X strings dieran el amperaje ideal
+    const potentialAmps = idealStringAmps * capacity; // Usamos la capacidad real
     const potentialKW = (potentialAmps * vdc) / 1000;
 
     // Pérdida (Mínimo 0)
@@ -70,7 +80,7 @@ export function analyzeScb(scb: ScbData): ScbAnalysis {
     const dailyLostMWh = (lostKW * HORAS_SOL_PICO) / 1000;
 
     return {
-        activeStrings: 18 - dead - low,
+        activeStrings: capacity - dead - low,
         deadStrings: dead,
         lowPerfStrings: low,
         actualPowerKW: actualKW,

@@ -15,8 +15,8 @@ export function InverterForensics({ scbs, title }: { scbs: ScbData[], title: str
     const totalPotential = analysis.reduce((acc, curr) => acc + curr.potentialPowerKW, 0);
     const totalActual = analysis.reduce((acc, curr) => acc + curr.actualPowerKW, 0);
 
-    // 🔥 NUEVO: Calculamos la corriente total bruta para desempatar
-    const totalRawAmps = scbs.reduce((acc, curr) => acc + (curr.i_total ?? 0), 0);
+    // 🔥 NUEVO: Calculamos la corriente total bruta para desempatar (Divided by 100)
+    const totalRawAmps = scbs.reduce((acc, curr) => acc + ((curr.i_total ?? 0) / 100), 0);
 
     // --- LÓGICA DE ESTADO SUPERIOR ---
 

@@ -6,6 +6,9 @@ import { useParams, useRouter } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
 
 import { ScbData } from '@/app/types';
+import { useActiveAlarms } from "@/hooks/use-alarms";
+import { useScadaStream } from "@/app/hooks/useScadaStream";
+import { ActiveAlarm } from "@/app/types/alarms";
 import { ScbCard } from '@/app/components/ps/ScbCard';
 import { StringDetailDialog } from '@/app/components/ps/StringDetailDialog';
 import { InverterForensics } from '@/app/components/ps/InverterForensics'; // <--- EL COMPONENTE NUEVO
@@ -26,19 +29,34 @@ export default function PsDetailPage() {
     // Estado para el Modal
     const [selectedScb, setSelectedScb] = useState<ScbData | null>(null);
 
-    // React Query
-    const { data: scbs, isLoading, isError } = useQuery({
+    // React Query (Carga Inicial Estática)
+    const { data: staticScbs, isLoading, isError } = useQuery({
         queryKey: ['ps-data', psName],
         queryFn: () => fetchPsData(psName),
-        refetchInterval: 2000,
+        refetchOnWindowFocus: false, // Menos polling
     });
+
+    // 2. Fetch Active Alarms (DB based still)
+    const { data: alarmData } = useActiveAlarms();
+
+    // 3. Conexión en vivo Fase 1 & 2 (SSE)
+    const { data: liveData, isConnected } = useScadaStream();
 
     if (isLoading) return <div className="h-screen flex items-center justify-center text-slate-500">Cargando telemetría de {psName}...</div>;
     if (isError) return <div className="h-screen flex items-center justify-center text-rose-500">Error cargando datos.</div>;
 
-    // Separar por Inversores
-    const inv1 = scbs?.filter(s => s.inversor === 1) || [];
-    const inv2 = scbs?.filter(s => s.inversor === 2) || [];
+    // Fusión de Datos: Tomamos la base y la sobrescribimos con los paquetes en vivo de RAM
+    const scbs = staticScbs?.map(scb => {
+        const key = `${scb.power_station}-${scb.inversor}-${scb.scb}`;
+        if (liveData[key]) {
+            return { ...scb, ...liveData[key] };
+        }
+        return scb;
+    }) || [];
+
+    // Separar por Inversores (Agrupación normal basada en la columna 'inversor' del driver V2)
+    const inv1 = scbs.filter(s => s.inversor === 1);
+    const inv2 = scbs.filter(s => s.inversor === 2);
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 p-6 pb-20">
@@ -52,8 +70,10 @@ export default function PsDetailPage() {
                     <p className="text-slate-500 text-sm">Análisis de Rendimiento por Inversor</p>
                 </div>
                 <div className="ml-auto flex items-center gap-2">
-                    <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span className="text-xs text-emerald-500 font-mono">EN VIVO</span>
+                    <span className={`flex h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></span>
+                    <span className={`text-xs font-mono ${isConnected ? 'text-emerald-500' : 'text-rose-500'}`}>
+                        {isConnected ? 'EN VIVO (SSE)' : 'DESCONECTADO'}
+                    </span>
                 </div>
             </div>
 
@@ -66,9 +86,21 @@ export default function PsDetailPage() {
 
                     {/* Grid de Tarjetas */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                        {inv1.map((scb) => (
-                            <ScbCard key={`${scb.inversor}-${scb.scb}`} data={scb} onClick={setSelectedScb} />
-                        ))}
+                        {inv1.map((scb) => {
+                            const scbAlarms = alarmData?.alarms.filter(a =>
+                                a.power_station === psName &&
+                                a.inversor === scb.inversor &&
+                                a.scb === scb.scb
+                            );
+                            return (
+                                <ScbCard
+                                    key={`${scb.inversor}-${scb.scb}`}
+                                    data={scb}
+                                    alarms={scbAlarms}
+                                    onClick={setSelectedScb}
+                                />
+                            );
+                        })}
                     </div>
                 </section>
 
@@ -79,9 +111,22 @@ export default function PsDetailPage() {
 
                     {/* Grid de Tarjetas */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                        {inv2.map((scb) => (
-                            <ScbCard key={`${scb.inversor}-${scb.scb}`} data={scb} onClick={setSelectedScb} />
-                        ))}
+                        {inv2.map((scb) => {
+                            const scbAlarms = alarmData?.alarms.filter(a =>
+                                a.power_station === psName &&
+                                a.inversor === scb.inversor &&
+                                a.scb === scb.scb
+                            );
+
+                            return (
+                                <ScbCard
+                                    key={`${scb.inversor}-${scb.scb}`}
+                                    data={scb}
+                                    alarms={scbAlarms}
+                                    onClick={setSelectedScb}
+                                />
+                            );
+                        })}
                     </div>
                 </section>
             </div>
