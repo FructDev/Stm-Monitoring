@@ -23,7 +23,7 @@ export default function Providers({ children }: { children: React.ReactNode }) {
     return (
         <QueryClientProvider client={queryClient}>
             {children}
-            <Toaster richColors position="top-right" expand={true} closeButton={true} visibleToasts={2} />
+            <Toaster position="bottom-right" richColors closeButton expand={false} visibleToasts={5} />
         </QueryClientProvider>
     );
 }

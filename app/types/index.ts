@@ -18,6 +18,28 @@ export interface ScbData {
     s01: number; s02: number; s03: number; s04: number; s05: number; s06: number;
     s07: number; s08: number; s09: number; s10: number; s11: number; s12: number;
     s13: number; s14: number; s15: number; s16: number; s17: number; s18: number;
+    
+    // --- Analítica Avanzada (Gemelo Digital / Falsas Alarmas) ---
+    alarm_silenced?: boolean;
+    expected_current?: number;
+    health_score_pct?: number;
+    currents?: number[];
+}
+
+export interface MeteoData {
+    gateway_id: string; // ej: "METEO_1"
+    ts: string;
+    AirTC: number;         // Temp Ambiente
+    PYR001: number;        // Irradiancia Global
+    PYR002: number;        // Irradiancia Inclinada
+    WIND_SPEED: number;    // Viento
+    WIND_VANE: number;     // Dirección
+    Pt100_1: number;       // Panel Temp
+    Pt100_2: number;
+    Pt100_3: number;
+    Pt100_4: number;
+    Pt100_5: number;
+    [key: string]: any;
 }
 
 export interface ParkStats {

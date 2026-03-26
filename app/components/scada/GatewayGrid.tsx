@@ -12,7 +12,10 @@ import {
 } from "@/components/ui/dialog";
 /* Table imports removed as they are no longer used */
 import { Badge } from "@/components/ui/badge";
-import { Wifi, WifiOff, AlertTriangle } from "lucide-react";
+import { Wifi, AlertTriangle, Sun, ZapOff, CloudRain } from "lucide-react";
+import { useScadaStream } from "@/app/hooks/useScadaStream";
+import { useHealthThreshold } from "@/app/hooks/useHealthThreshold";
+import { useCurtailment } from "@/app/hooks/useCurtailment";
 
 // --- Fetcher ---
 async function fetchSnapshot(): Promise<GlobalSnapshot> {
@@ -47,20 +50,26 @@ function getStatusColor(errors: number, total: number) {
 
 // --- Main Component ---
 export function GatewayGrid() {
-    const { data, isLoading } = useQuery({
+    // 1. Snapshot for latency and HTTP health
+    const { data: snapshotData, isLoading } = useQuery({
         queryKey: ['scada-snapshot'],
         queryFn: fetchSnapshot,
         refetchInterval: 5000
     });
 
+    // 2. Twin Engine data
+    const { data: scadaData, meteoData } = useScadaStream();
+    const { threshold } = useHealthThreshold();
+    const { isManualCurtailment } = useCurtailment();
+
     const [selectedPs, setSelectedPs] = useState<string | null>(null);
 
-    if (isLoading || !data) {
+    if (isLoading || !snapshotData) {
         return <div className="text-slate-500 text-center animate-pulse">Cargando estado de Gateways...</div>;
     }
 
     // Sort PS numerically (PS1, PS2, PS10...)
-    const psKeys = Object.keys(data).sort((a, b) => {
+    const psKeys = Object.keys(snapshotData).sort((a, b) => {
         const numA = parseInt(a.replace('PS', '')) || 0;
         const numB = parseInt(b.replace('PS', '')) || 0;
         return numA - numB;
@@ -70,9 +79,35 @@ export function GatewayGrid() {
         <>
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
                 {psKeys.map((psName) => {
-                    const psData = data[psName];
+                    const psData = snapshotData[psName];
                     const stats = getPsStats(psData);
-                    const colorClass = getStatusColor(stats.errors, stats.total);
+                    
+                    // --- Analítica Avanzada ---
+                    const psNumber = psName.replace('PS', '');
+                    const regionalMeteo = meteoData[`METEO_${psNumber}`];
+                    const irradiance = regionalMeteo?.PYR002 ?? 0;
+
+                    // Compute damaged strings
+                    // Un string se asume dañado térmicamente si su SCB reporta un health_score_pct < threshold y NO está en curtailment
+                    const psScbs = Object.values(scadaData).filter(scb => scb.power_station === psName);
+                    
+                    let damagedStringsCount = 0;
+                    
+                    // Si la irradiancia local es muy baja (entre 0.1 y 100 W/m²), no clasificamos 0A como daño térmico
+                    const isIrradianceTooLow = irradiance > 0 && irradiance < 100;
+
+                    psScbs.forEach(scb => {
+                        const effectivelySilenced = scb.alarm_silenced || isManualCurtailment || isIrradianceTooLow;
+                        if (!effectivelySilenced && scb.health_score_pct !== undefined && scb.health_score_pct < threshold) {
+                             if (scb.currents && Array.isArray(scb.currents)) {
+                                 damagedStringsCount += scb.currents.filter(ampsRaw => ampsRaw < 50).length;
+                             }
+                        }
+                    });
+
+                    // El color ahora depende de los fallos físicos reales + los de red
+                    const totalAnomalies = stats.errors + damagedStringsCount;
+                    const colorClass = getStatusColor(totalAnomalies, stats.total);
 
                     return (
                         <Card
@@ -83,26 +118,32 @@ export function GatewayGrid() {
                             <CardHeader className="p-4 pb-2">
                                 <CardTitle className="flex justify-between items-center text-lg">
                                     {psName}
-                                    {stats.errors === 0 ?
+                                    {totalAnomalies === 0 ?
                                         <Wifi className="h-5 w-5 text-emerald-500" /> :
-                                        <div className="flex gap-1">
-                                            <span className="text-sm font-bold text-rose-400">{stats.errors}</span>
+                                        <div className="flex gap-1" title={`${stats.errors} Offlines, ${damagedStringsCount} Térmicos`}>
+                                            <span className="text-sm font-bold text-rose-400">{totalAnomalies}</span>
                                             <AlertTriangle className="h-5 w-5 text-rose-500" />
                                         </div>
                                     }
                                 </CardTitle>
                             </CardHeader>
                             <CardContent className="p-4 pt-0">
-                                <div className="text-xs text-slate-400 mt-2 space-y-1">
-                                    <div className="flex justify-between">
-                                        <span>Latencia:</span>
-                                        <span className={`font-mono ${stats.avgLatency > 2000 ? 'text-orange-400' : 'text-slate-200'}`}>
-                                            {stats.avgLatency.toFixed(0)} ms
+                                <div className="text-xs text-slate-400 mt-2 space-y-1.5 font-medium">
+                                    <div className="flex justify-between items-center bg-slate-950/50 p-1 rounded">
+                                        <div className="flex items-center gap-1.5"><Sun className="h-3.5 w-3.5 text-amber-500"/> <span>Irradiancia Local:</span></div>
+                                        <span className={`font-mono text-[11px] ${irradiance > 200 ? 'text-amber-400' : 'text-slate-500'}`}>
+                                            {irradiance.toFixed(1)} W/m²
                                         </span>
                                     </div>
-                                    <div className="flex justify-between">
-                                        <span>Equipos:</span>
-                                        <span>{stats.total - stats.errors} / {stats.total}</span>
+                                    <div className="flex justify-between items-center bg-slate-950/50 p-1 rounded">
+                                        <div className="flex items-center gap-1.5"><ZapOff className={`h-3.5 w-3.5 ${damagedStringsCount > 0 ? 'text-rose-500' : 'text-slate-600'}`}/> <span>Strings Dañados:</span></div>
+                                        <span className={`font-mono text-[11px] font-bold ${damagedStringsCount > 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
+                                            {damagedStringsCount}
+                                        </span>
+                                    </div>
+                                    <div className="flex justify-between px-1">
+                                        <span>Ping: {stats.avgLatency.toFixed(0)}ms</span>
+                                        <span>Equipos: {stats.total - stats.errors} / {stats.total}</span>
                                     </div>
                                 </div>
                             </CardContent>
@@ -120,34 +161,34 @@ export function GatewayGrid() {
                                 <span className="font-bold">{selectedPs}</span>
                                 <span className="text-base font-normal text-slate-500">| Conectividad</span>
                             </div>
-                            {selectedPs && data[selectedPs] && (
-                                <Badge variant="outline" className={`${Object.values(data[selectedPs]).some(d => d.last_quality !== "Good") ? 'border-rose-500 text-rose-500' : 'border-emerald-500 text-emerald-500'}`}>
-                                    {Object.values(data[selectedPs]).every(d => d.last_quality === "Good") ? "Todo OK" : "Fallos Detectados"}
+                            {selectedPs && snapshotData[selectedPs] && (
+                                <Badge variant="outline" className={`${Object.values(snapshotData[selectedPs]).some(d => d.last_quality !== "Good") ? 'border-rose-500 text-rose-500' : 'border-emerald-500 text-emerald-500'}`}>
+                                    {Object.values(snapshotData[selectedPs]).every(d => d.last_quality === "Good") ? "Todo OK" : "Fallos Detectados"}
                                 </Badge>
                             )}
                         </DialogTitle>
                     </DialogHeader>
 
-                    {selectedPs && data[selectedPs] && (
+                    {selectedPs && snapshotData[selectedPs] && (
                         <div className="space-y-4">
                             {/* Summary Stats Rows similar to StringDialog metric boxes */}
                             <div className="grid grid-cols-3 gap-2 text-center text-xs text-slate-400">
                                 <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                                    Total Equipos: <span className="text-white font-bold">{Object.keys(data[selectedPs]).length}</span>
+                                    Total Equipos: <span className="text-white font-bold">{Object.keys(snapshotData[selectedPs]).length}</span>
                                 </div>
                                 <div className="bg-slate-900 p-2 rounded border border-slate-800">
                                     Promedio Latencia: <span className="text-white font-bold">
-                                        {(Object.values(data[selectedPs]).reduce((a, b) => a + b.latency_ms, 0) / Object.keys(data[selectedPs]).length).toFixed(0)} ms
+                                        {(Object.values(snapshotData[selectedPs]).reduce((a, b) => a + b.latency_ms, 0) / Object.keys(snapshotData[selectedPs]).length).toFixed(0)} ms
                                     </span>
                                 </div>
                                 <div className="bg-slate-900 p-2 rounded border border-slate-800">
-                                    Fallos: <span className="text-rose-400 font-bold">{Object.values(data[selectedPs]).filter(d => d.last_quality !== "Good").length}</span>
+                                    Fallos Red: <span className="text-rose-400 font-bold">{Object.values(snapshotData[selectedPs]).filter(d => d.last_quality !== "Good").length}</span>
                                 </div>
                             </div>
 
                             {/* The "String-Style" Grid */}
                             <div className="grid grid-cols-6 gap-2">
-                                {Object.entries(data[selectedPs])
+                                {Object.entries(snapshotData[selectedPs])
                                     .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
                                     .map(([id, device]) => {
                                         const isGood = device.last_quality === "Good";

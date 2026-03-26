@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { ScbData } from '@/app/types';
+import { ScbData, MeteoData } from '@/app/types';
 
 // Ojo: Este tipo es el que emite el backend por el canal SSE
 export interface SsePacket {
@@ -9,17 +9,18 @@ export interface SsePacket {
     mid: number;
     inversor: number;
     scb: number;
+    alarm_silenced?: boolean;
     state: {
-        last_quality: "Good" | "Bad" | "Stale" | "Offline" | "Uncertain";
+        last_quality: "Good" | "Bad" | "Stale" | "Offline" | "Uncertain" | string;
         last_timestamp_ms: number;
         last_error: string | null;
-    };
-    data: Partial<ScbData>; // Todo el payload de voltajes, amperajes, s01...s18
+    } | string;
+    data: Partial<ScbData> & Partial<MeteoData>; // Merge the payloads
 }
 
-// Mantenemos un "store" global en memoria para no saturar contextos
-// La llave será `${ps}-${inversor}-${scb}`
+// Mantenemos stores globales en memoria para no saturar contextos
 let globalScadaStore: Record<string, ScbData> = {};
+let globalMeteoStore: Record<string, MeteoData> = {};
 
 // Suscriptores al store
 type Listener = () => void;
@@ -38,7 +39,7 @@ function initSse() {
     isConnecting = true;
 
     try {
-        sseConnection = new EventSource('http://localhost:3030/live');
+        sseConnection = new EventSource('/api/live');
 
         sseConnection.onmessage = (event) => {
             try {
@@ -48,26 +49,53 @@ function initSse() {
                 // Esto permite que ScbCard y ReportModal sigan funcionando sin cambios masivos
                 const key = `${packet.gateway_id}-${packet.inversor}-${packet.scb}`;
 
-                // Traducción de Estado. 
-                // El driver hace debouncing, confiamos en su "last_quality" en lugar de hacer polling
+                // Determine timestamp and status robustly since rust might send state as string or object
                 let mappedStatus = "OK";
-                if (packet.state.last_quality === "Offline") mappedStatus = "OFFLINE";
-                if (packet.state.last_quality === "Bad") mappedStatus = "READ_FAIL";
+                let isoTs = new Date().toISOString();
 
-                const mergedData: ScbData = {
-                    power_station: packet.gateway_id,
-                    inversor: packet.inversor,
-                    scb: packet.scb,
-                    ts: new Date(packet.state.last_timestamp_ms).toISOString(),
-                    estado: mappedStatus,
-                    ...packet.data // Esparce v_total como vdc, i_total, s01..s18 si el rust loggea esos alias
-                } as ScbData;
+                if (typeof packet.state === "object" && packet.state !== null) {
+                    if (packet.state.last_quality === "Offline") mappedStatus = "OFFLINE";
+                    if (packet.state.last_quality === "Bad") mappedStatus = "READ_FAIL";
+                    if (packet.state.last_timestamp_ms) {
+                        isoTs = new Date(packet.state.last_timestamp_ms).toISOString();
+                    }
+                } else if (typeof packet.state === "string") {
+                    if (packet.state === "Offline") mappedStatus = "OFFLINE";
+                    if (packet.state === "Bad") mappedStatus = "READ_FAIL";
+                }
 
-                // Actualizamos el diccionario global
-                globalScadaStore[key] = {
-                    ...globalScadaStore[key],
-                    ...mergedData
-                };
+                // Split logic for Meteo stations vs Standard SCBs
+                if (packet.gateway_id.startsWith("METEO_")) {
+                    const meteoKey = packet.gateway_id;
+                    const meteoData: MeteoData = {
+                        gateway_id: packet.gateway_id,
+                        ts: isoTs,
+                        ...packet.data
+                    } as MeteoData;
+                    
+                    globalMeteoStore[meteoKey] = {
+                        ...(globalMeteoStore[meteoKey] || {}),
+                        ...meteoData
+                    };
+                    
+                    // console.log(`[SSE Debug] Updated METEO Store. Count: ${Object.keys(globalMeteoStore).length}`);
+                } else {
+                    const key = `${packet.gateway_id}-${packet.inversor}-${packet.scb}`;
+                    const mergedData: ScbData = {
+                        power_station: packet.gateway_id,
+                        inversor: packet.inversor,
+                        scb: packet.scb,
+                        ts: isoTs,
+                        estado: mappedStatus,
+                        alarm_silenced: packet.alarm_silenced, // Capture the rust curtailment override
+                        ...packet.data 
+                    } as ScbData;
+
+                    globalScadaStore[key] = {
+                        ...globalScadaStore[key],
+                        ...mergedData
+                    };
+                }
 
                 // Avisar a react
                 notifyListeners();
@@ -97,6 +125,7 @@ function initSse() {
  */
 export function useScadaStream() {
     const [store, setStore] = useState<Record<string, ScbData>>(globalScadaStore);
+    const [meteoStore, setMeteoStore] = useState<Record<string, MeteoData>>(globalMeteoStore);
     const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
@@ -106,6 +135,7 @@ export function useScadaStream() {
         // Suscribirse a cambios
         const listener = () => {
             setStore({ ...globalScadaStore });
+            setMeteoStore({ ...globalMeteoStore });
             setIsConnected(sseConnection?.readyState === EventSource.OPEN);
         };
         listeners.add(listener);
@@ -118,5 +148,5 @@ export function useScadaStream() {
         };
     }, []);
 
-    return { data: store, isConnected };
+    return { data: store, meteoData: meteoStore, isConnected };
 }

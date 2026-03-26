@@ -26,6 +26,7 @@ interface HistoricalDataPoint {
     power_kw_avg: number;
     temp_avg: number;
     currents: number[];
+    expected_current?: number;
 }
 
 interface Props {
@@ -99,6 +100,7 @@ export function HistoricalChart({ psName, mid, inversor, scbId, stringId }: Prop
             time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             Voltaje: d.v_avg,
             Amperaje: d.i_total_avg,
+            AmperajeEsperado: d.expected_current ? d.expected_current : undefined,
             Potencia: d.power_kw_avg,
             Temperatura: d.temp_avg,
             StringCurrent: stringCurrent,
@@ -204,11 +206,21 @@ export function HistoricalChart({ psName, mid, inversor, scbId, stringId }: Prop
                                 <Line
                                     yAxisId="right"
                                     type="monotone"
+                                    dataKey="AmperajeEsperado"
+                                    stroke="#ec4899"
+                                    strokeWidth={2}
+                                    strokeDasharray="5 5"
+                                    dot={false}
+                                    name="Corriente Favorable (A)"
+                                />
+                                <Line
+                                    yAxisId="right"
+                                    type="monotone"
                                     dataKey="Amperaje"
                                     stroke="#10b981"
                                     strokeWidth={2}
                                     dot={false}
-                                    name="Corriente (A)"
+                                    name="Corriente Real (A)"
                                 />
                                 <Line
                                     yAxisId="right"

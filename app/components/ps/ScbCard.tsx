@@ -1,8 +1,10 @@
 import { ScbData } from "@/app/types";
 import { analyzeScb } from "@/app/lib/analytics";
-import { Zap, AlertTriangle, WifiOff, ArrowDown } from "lucide-react";
+import { Zap, AlertTriangle, WifiOff, ArrowDown, Factory } from "lucide-react";
 
 import { ActiveAlarm } from "@/app/types/alarms";
+import { useHealthThreshold } from "@/app/hooks/useHealthThreshold";
+import { useCurtailment } from "@/app/hooks/useCurtailment";
 
 interface Props {
     data: ScbData;
@@ -10,55 +12,51 @@ interface Props {
     onClick: (scb: ScbData) => void;
 }
 
-export function ScbCard({ data, alarms, onClick }: Props) {
+export function ScbCard({ data, alarms: activeAlarms, onClick }: Props) {
+    const { threshold } = useHealthThreshold();
+    const { isManualCurtailment } = useCurtailment();
+
+    // Nueva Lógica Analítica de Supresión de Alarmas V2
+    const effectivelySilenced = data.alarm_silenced || isManualCurtailment;
+    const isCurtailment = effectivelySilenced === true;
+
     // 1. Determinamos si está muerta (Offline o Fallo de Lectura)
     const isOffline = data.estado === 'OFFLINE' || data.estado === 'READ_FAIL';
 
-    // 2. Determinamos si tiene una Alerta Activa (DB Alarms system priority)
-    const hasActiveAlarms = alarms && alarms.length > 0;
+    // 2. Determinamos si tiene una Alerta Activa (DB legacy)
+    const hasActiveAlarms = activeAlarms && activeAlarms.length > 0;
     const topSeverity = hasActiveAlarms
-        ? Math.max(...alarms.map(a => a.severity))
+        ? Math.max(...activeAlarms.map(a => a.severity))
         : 0;
 
-    // 3. Ejecutamos el análisis (solo será útil si NO está offline)
+    // 3. Ejecutamos el análisis tradicional por si acaso (para kW perdidos)
     const analytics = analyzeScb(data);
+    const score = data.health_score_pct ?? 100;
 
-    // Existing alert logic as fallback or combined? 
-    // Let's treat topSeverity >= 2 as critical/warning override
-    const isLegacyAlert = data.estado.includes('POSIBLE') ||
-        data.estado === 'BAJA_TENSION' ||
-        data.estado.includes('ALERTA');
-
-    // REFINAMIENTO DE ALERTA:
-    // Priorizamos el análisis en tiempo real sobre el estado heredado (legacy).
-    // Si no hay strings muertos (fusibles rotos), ignoramos las alertas de strings de la DB.
-    // Antes revisábamos también 'lowPerfStrings', pero la DB suele marcar 'ALERTA' por fusibles,
-    // así que si deadStrings es 0, asumimos que es un falso positivo del sistema viejo.
-    let isRealAlert = isLegacyAlert;
-
-    if (analytics.deadStrings === 0) {
-        if (data.estado.includes('ALERTA') || data.estado.includes('POSIBLE') || data.estado === 'BAJA_TENSION') {
-            isRealAlert = false;
-        }
-    }
-
-    const isAlert = isRealAlert || hasActiveAlarms;
-    let statusClass = "border-slate-800 bg-slate-900 hover:border-slate-600"; // Default
+    // --- JERARQUÍA INTELIGENTE DE COLORES (SCADA ANALÍTICO) ---
+    let statusClass = "border-slate-800 bg-slate-900 hover:border-slate-600";
+    let isCritical = false;
+    let isWarning = false;
 
     if (isOffline) {
-        // Red ghost
         statusClass = "border-rose-900/50 bg-rose-950/10 opacity-60 hover:opacity-100 hover:border-rose-500";
     }
-    else if (topSeverity >= 3) {
-        // Critical Alarm (Red Solid)
+    else if (effectivelySilenced) {
+        // Prioridad 1: Curtailment o Nubes (Ambar Neutral) SUPRIME ALARMAS FALSAS
+        statusClass = "border-amber-900/60 bg-amber-950/20 hover:border-amber-500";
+    }
+    else if (score < threshold || topSeverity >= 3) {
+        // Prioridad 2: Daño Severo (Fusible Roto)
+        isCritical = true;
         statusClass = "border-rose-600 bg-rose-950/30 hover:border-rose-400";
     }
-    else if (isAlert || analytics.efficiency < 80 || topSeverity === 2) {
-        // Warning (Orange)
+    else if (score < 95 || topSeverity === 2) {
+        // Prioridad 3: Degradación Leve (Mantenimiento)
+        isWarning = true;
         statusClass = "border-orange-900/60 bg-orange-950/10 hover:border-orange-500";
     }
     else {
-        // OK
+        // Prioridad 4: Óptimo
         statusClass = "border-emerald-900/30 bg-emerald-950/5 hover:border-emerald-500";
     }
 
@@ -69,8 +67,8 @@ export function ScbCard({ data, alarms, onClick }: Props) {
 
     return (
         <div
-            onClick={() => onClick(data)}
-            className={`relative p-3 rounded-lg border-2 transition-all cursor-pointer hover:shadow-lg group ${statusClass}`}
+            onClick={() => { if (!isOffline) onClick(data); }}
+            className={`relative p-3 rounded-lg border-2 transition-all cursor-pointer hover:shadow-lg group ${statusClass} ${isOffline ? 'cursor-not-allowed' : ''}`}
         >
             {/* Cabecera: Nombre e Icono de Estado */}
             <div className="flex justify-between items-center mb-2">
@@ -80,9 +78,10 @@ export function ScbCard({ data, alarms, onClick }: Props) {
 
                 {/* Iconografía Dinámica */}
                 {isOffline ? <WifiOff className="h-4 w-4 text-rose-500" /> :
-                    (topSeverity >= 3) ? <AlertTriangle className="h-4 w-4 text-rose-500 animate-pulse" /> :
-                        isAlert ? <AlertTriangle className="h-4 w-4 text-orange-500" /> :
-                            <Zap className="h-4 w-4 text-emerald-600 opacity-50" />}
+                    effectivelySilenced ? <Factory className="h-4 w-4 text-amber-500 opacity-80" aria-label="Limitación SENI (Curtailment)" /> :
+                    isCritical ? <AlertTriangle className="h-4 w-4 text-rose-500 animate-pulse" /> :
+                    isWarning ? <AlertTriangle className="h-4 w-4 text-orange-500" /> :
+                    <Zap className="h-4 w-4 text-emerald-600 opacity-50" />}
             </div>
 
             {/* Cuerpo Principal: Amperaje */}
@@ -98,14 +97,13 @@ export function ScbCard({ data, alarms, onClick }: Props) {
                     </div>
                 </div>
 
-                {/* Información de Pérdidas (Solo si está ONLINE y hay pérdidas reales) */}
-                {!isOffline && analytics.lostPowerKW > 0.5 && (
-                    <div className="text-right">
-                        <div className="text-xs text-rose-400 font-bold flex items-center justify-end">
-                            <ArrowDown className="h-3 w-3" />
-                            {analytics.lostPowerKW.toFixed(1)} kW
+                {/* Información Predictiva de Salud (Twins) */}
+                {!isOffline && score < 100 && (
+                    <div className="text-right flex flex-col items-end pt-1">
+                        <div className={`text-xs font-bold font-mono tracking-tighter ${isCritical ? 'text-rose-400' : isWarning ? 'text-orange-400' : 'text-slate-400'}`}>
+                            {score.toFixed(1)}%
                         </div>
-                        <div className="text-[10px] text-slate-500">Perdidos</div>
+                        <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">Salud</div>
                     </div>
                 )}
             </div>
