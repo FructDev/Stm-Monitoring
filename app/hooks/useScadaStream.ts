@@ -81,6 +81,25 @@ function initSse() {
                     // console.log(`[SSE Debug] Updated METEO Store. Count: ${Object.keys(globalMeteoStore).length}`);
                 } else {
                     const key = `${packet.gateway_id}-${packet.inversor}-${packet.scb}`;
+                    
+                    // --- Mapeo Automático de V2 (Rust) a V1 (Legacy) ---
+                    const mappedCurrents: Partial<ScbData> = {};
+                    if (packet.data.currents && Array.isArray(packet.data.currents)) {
+                        let sumAmps = 0;
+                        packet.data.currents.forEach((val, i) => {
+                            const stringKey = `s${String(i + 1).padStart(2, "0")}` as keyof ScbData;
+                            (mappedCurrents as any)[stringKey] = val;
+                            sumAmps += val;
+                        });
+                        mappedCurrents.i_total = sumAmps;
+                    }
+                    if (packet.data.voltage_raw !== undefined) {
+                        mappedCurrents.vdc = packet.data.voltage_raw;
+                    }
+                    if (packet.data.temp_raw !== undefined) {
+                        mappedCurrents.temp_c = packet.data.temp_raw / 10;
+                    }
+
                     const mergedData: ScbData = {
                         power_station: packet.gateway_id,
                         inversor: packet.inversor,
@@ -88,7 +107,8 @@ function initSse() {
                         ts: isoTs,
                         estado: mappedStatus,
                         alarm_silenced: packet.alarm_silenced, // Capture the rust curtailment override
-                        ...packet.data 
+                        ...packet.data,
+                        ...mappedCurrents
                     } as ScbData;
 
                     globalScadaStore[key] = {

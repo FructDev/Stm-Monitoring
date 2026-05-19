@@ -25,43 +25,42 @@ export function analyzeScb(scb: ScbData): ScbAnalysis {
     // Determinar capacidad real de la caja (15 o 18)
     const capacity = getScbCapacity(scb.power_station, scb.inversor, scb.scb);
 
-    // Extraer strings de forma segura
-    // Solo consideramos los strings hasta la capacidad definida
-    let currents = [
-        scb.s01, scb.s02, scb.s03, scb.s04, scb.s05, scb.s06,
-        scb.s07, scb.s08, scb.s09, scb.s10, scb.s11, scb.s12,
-        scb.s13, scb.s14, scb.s15, scb.s16, scb.s17, scb.s18
-    ].map(val => (val ?? 0) / 100); // Si es null, lo convierte a 0 y divide por 100
+    const stringKeys = ["s01", "s02", "s03", "s04", "s05", "s06", "s07", "s08", "s09", "s10", "s11", "s12", "s13", "s14", "s15", "s16", "s17", "s18"] as (keyof ScbData)[];
+    
+    let validStringsCount = 0;
+    let sumValidAmps = 0;
+    const currents: number[] = [];
 
-    // Si es de 15 strings, cortamos el array
-    if (capacity === 15) {
-        currents = currents.slice(0, 15);
+    for (let i = 0; i < capacity; i++) {
+        const rawVal = scb[stringKeys[i]];
+        // Ignoramos explícitamente nulos
+        if (rawVal === null || rawVal === undefined) continue;
+        
+        const val = Number(rawVal) / 100;
+        currents.push(val);
+        
+        // Promediamos usando los strings vivos (>0.5)
+        if (val >= 0.5) {
+            sumValidAmps += val;
+            validStringsCount++;
+        }
     }
 
-    // 2. Determinar "Corriente Ideal" (Benchmark)
-    // Usamos el promedio de los strings BUENOS de esta misma caja.
-    const goodStrings = currents.filter(a => a > 1.0);
-
-    // Si la caja está muerta o es de noche, retornamos todo en 0
-    if (goodStrings.length === 0) {
-        return {
-            activeStrings: 0, deadStrings: 0, lowPerfStrings: 0,
-            actualPowerKW: 0, potentialPowerKW: 0, lostPowerKW: 0,
-            efficiency: 0, dailyLostMWh: 0
-        };
-    }
-
-    const idealStringAmps = goodStrings.reduce((a, b) => a + b, 0) / goodStrings.length;
-
-    // 3. Clasificar Strings
     let dead = 0;
     let low = 0;
+    let idealStringAmps = 0;
 
-    currents.forEach(val => {
-        // Solo contamos como "muerto" si la caja tiene voltaje (está activa)
-        if (val < 0.5) dead++;
-        else if (val < idealStringAmps * 0.7) low++;
-    });
+    // Si la caja no produce suficiente (ej < 5A global) o no hay strings válidos, no juzgamos muertos para evitar falsos positivos
+    if (i_total > 5 && validStringsCount > 0) {
+        idealStringAmps = sumValidAmps / validStringsCount;
+        const failureThreshold = idealStringAmps * 0.20; // < 20% = Fusible abierto
+        const lowPerfThreshold = idealStringAmps * 0.70; // < 70% = Degradación/Sombra
+
+        currents.forEach(val => {
+            if (val < failureThreshold) dead++;
+            else if (val < lowPerfThreshold) low++;
+        });
+    }
 
     // 4. Cálculos de Potencia (P = V * I) / 1000 = kW
     const actualKW = (i_total * vdc) / 1000;

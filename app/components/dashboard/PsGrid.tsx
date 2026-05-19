@@ -22,26 +22,8 @@ export function PsGrid({ stations }: { stations: PsSummary[] }) {
                 const regionalMeteo = meteoData[`METEO_${psNumber}`];
                 const irradiance = regionalMeteo?.PYR002 ?? 0;
 
-                // Compute damaged strings
-                // Un string se asume dañado térmicamente si su SCB reporta un health_score_pct < threshold y NO está en curtailment
-                const psScbs = Object.values(scadaData).filter(scb => scb.power_station === ps.name);
-                
-                let damagedStringsCount = 0;
-                
-                // Si la irradiancia local es muy baja (entre 0.1 y 100 W/m²), los inversores pueden apagarse naturalmente o dar 0A.
-                // Si es estrictamente 0, asumimos que no hay sensor y evaluamos normal.
-                const isIrradianceTooLow = irradiance > 0 && irradiance < 100;
-
-                psScbs.forEach(scb => {
-                    const effectivelySilenced = scb.alarm_silenced || isManualCurtailment || isIrradianceTooLow;
-                    // Solo contamos fallas si el SCB completo está debajo del umbral vital Y no hay Curtailment
-                    if (!effectivelySilenced && scb.health_score_pct !== undefined && scb.health_score_pct < threshold) {
-                         // Contamos físicamente qué strings están en 0A (o muy cerca del 0, ej < 0.5A que es 50 en la data cruda)
-                         if (scb.currents && Array.isArray(scb.currents)) {
-                             damagedStringsCount += scb.currents.filter(ampsRaw => ampsRaw < 50).length;
-                         }
-                    }
-                });
+                // Utilizamos el cálculo estadístico purificado que viene directamente del servidor
+                const damagedStringsCount = ps.dead_strings || 0;
 
                 // Color dinámico base
                 let statusColor = "border-slate-800 bg-slate-900";

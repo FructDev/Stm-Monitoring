@@ -65,7 +65,7 @@ export function AlarmToastController() {
             const { alarm, uniqueKey } = target;
 
             // 4. Display Toast
-            const friendlyMsg = translateAlarmMessage(alarm.alarm_code, alarm.message);
+            const translation = translateAlarmMessage(alarm.alarm_code, alarm.message);
 
             let deviceLocation = "";
             if (alarm.inversor) deviceLocation += `Inv ${alarm.inversor}`;
@@ -76,7 +76,7 @@ export function AlarmToastController() {
 
             toast.error(title, {
                 id: uniqueKey, // Use ID to prevent duplicates/stacking of same alarm
-                description: friendlyMsg,
+                description: translation.title,
                 duration: TOAST_DURATION,
                 icon: <ShieldAlert className="w-5 h-5 text-red-600" />,
                 action: {

@@ -11,10 +11,11 @@ export async function GET() {
     const UMBRAL_SEGUNDOS = 90000; // 15 minutos
 
     // 🔥 CAMBIO: Traemos TODAS las columnas (s01...s18) para analizar strings
+    // Filtramos los registros antiguos de Python (PS1 inversor 1 scb > 18) dejando solo los vivos de Rust
     const rawData = db
       .prepare(
         `
-      SELECT * FROM lecturas_live
+      SELECT * FROM lecturas_live WHERE power_station LIKE 'PS%' AND NOT (power_station = 'PS1' AND inversor = 1 AND scb > 18)
     `
       )
       .all() as any[];
@@ -40,6 +41,7 @@ export async function GET() {
         scb_count: number;
         offline_count: number;
         alert_count: number;
+        dead_strings_count: number;
         last_ts: string;
       }
     > = {};
@@ -61,6 +63,7 @@ export async function GET() {
           scb_count: 0,
           offline_count: 0,
           alert_count: 0,
+          dead_strings_count: 0,
           last_ts: row.ts,
         };
       }
@@ -93,26 +96,48 @@ export async function GET() {
           ps.alert_count++;
         }
 
-        // 🔥 CÁLCULO DE STRINGS DAÑADOS
-        // Solo contamos si la caja tiene corriente (> 2A) para evitar falsos positivos de noche
-        if (amps > 2) {
-          // Determinar capacidad real (15 o 18)
-          // Importante: getScbCapacity maneja internamente la lógica de SCB > 18
+        // 🔥 NUEVA LÓGICA DE STRINGS DAÑADOS (Estadística Relativa)
+        // Ignoramos la caja si tiene una corriente muy baja (< 5A global) 
+        // para evitar falsos positivos en el amanecer/atardecer o nubes.
+        if (amps > 5) {
           const capacity = getScbCapacity(row.power_station, row.inversor, row.scb);
+          
+          let validStringsCount = 0;
+          let sumValidAmps = 0;
+          const stringValues: number[] = [];
 
-          let deadInBox = 0;
-
-          // Solo iteramos hasta la capacidad real
+          // Primera pasada: recolectar datos reales y calcular promedio sano
           for (let i = 0; i < capacity; i++) {
             const key = `s${String(i + 1).padStart(2, "0")}`;
-            const val = (row[key] ?? 0) / 100; // Fix: Scale by 100
-
-            // Si es menor a 0.5A, lo consideramos muerto (Fusible abierto)
-            if (val >= 0 && val < 0.5) {
-              deadInBox++;
+            const rawVal = row[key];
+            
+            // Ignorar explícitamente nulos (falsos positivos por nulidad de getScbCapacity)
+            if (rawVal === null || rawVal === undefined) continue;
+            
+            const val = rawVal / 100;
+            stringValues.push(val);
+            
+            // Promediamos usando los strings vivos (>0.5)
+            if (val >= 0.5) {
+                sumValidAmps += val;
+                validStringsCount++;
             }
           }
-          total_dead_strings += deadInBox;
+
+          if (validStringsCount > 0) {
+            const avgHealthyCurrent = sumValidAmps / validStringsCount;
+            const failureThreshold = avgHealthyCurrent * 0.20; // 20% del promedio
+
+            let deadInBox = 0;
+            for (const val of stringValues) {
+                if (val < failureThreshold) {
+                    deadInBox++;
+                }
+            }
+
+            total_dead_strings += deadInBox;
+            ps.dead_strings_count += deadInBox;
+          }
         }
       }
     }
@@ -134,6 +159,7 @@ export async function GET() {
         name,
         total_amps: data.total_amps,
         scb_count: data.scb_count,
+        dead_strings: data.dead_strings_count,
         status,
       };
     });

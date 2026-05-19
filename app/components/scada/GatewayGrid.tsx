@@ -14,8 +14,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Wifi, AlertTriangle, Sun, ZapOff, CloudRain } from "lucide-react";
 import { useScadaStream } from "@/app/hooks/useScadaStream";
-import { useHealthThreshold } from "@/app/hooks/useHealthThreshold";
-import { useCurtailment } from "@/app/hooks/useCurtailment";
+import { analyzeScb } from "@/app/lib/analytics";
+import { ParkStats, PsSummary } from "@/app/types";
 
 // --- Fetcher ---
 async function fetchSnapshot(): Promise<GlobalSnapshot> {
@@ -57,10 +57,13 @@ export function GatewayGrid() {
         refetchInterval: 5000
     });
 
+    // Stats from SQL for accurate dead strings
+    const { data: statsData } = useQuery<ParkStats & { stations: PsSummary[] }>({
+        queryKey: ["park-stats"],
+    });
+
     // 2. Twin Engine data
     const { data: scadaData, meteoData } = useScadaStream();
-    const { threshold } = useHealthThreshold();
-    const { isManualCurtailment } = useCurtailment();
 
     const [selectedPs, setSelectedPs] = useState<string | null>(null);
 
@@ -87,23 +90,9 @@ export function GatewayGrid() {
                     const regionalMeteo = meteoData[`METEO_${psNumber}`];
                     const irradiance = regionalMeteo?.PYR002 ?? 0;
 
-                    // Compute damaged strings
-                    // Un string se asume dañado térmicamente si su SCB reporta un health_score_pct < threshold y NO está en curtailment
-                    const psScbs = Object.values(scadaData).filter(scb => scb.power_station === psName);
-                    
-                    let damagedStringsCount = 0;
-                    
-                    // Si la irradiancia local es muy baja (entre 0.1 y 100 W/m²), no clasificamos 0A como daño térmico
-                    const isIrradianceTooLow = irradiance > 0 && irradiance < 100;
-
-                    psScbs.forEach(scb => {
-                        const effectivelySilenced = scb.alarm_silenced || isManualCurtailment || isIrradianceTooLow;
-                        if (!effectivelySilenced && scb.health_score_pct !== undefined && scb.health_score_pct < threshold) {
-                             if (scb.currents && Array.isArray(scb.currents)) {
-                                 damagedStringsCount += scb.currents.filter(ampsRaw => ampsRaw < 50).length;
-                             }
-                        }
-                    });
+                    // Fetch accurate dead strings from SQL stats
+                    const psStats = statsData?.stations?.find(s => s.name === psName);
+                    const damagedStringsCount = psStats?.dead_strings || 0;
 
                     // El color ahora depende de los fallos físicos reales + los de red
                     const totalAnomalies = stats.errors + damagedStringsCount;

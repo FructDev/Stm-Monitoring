@@ -37,6 +37,13 @@ export function is15StringScb(ps: string, inversor: number, scb: number): boolea
     let detectInv = Number(inversor);
     let detectScb = Number(scb);
 
+    // Mapear cajas 19-36 a inversor 2, scb 1-18 para coincidir con la configuración lógica
+    // Rust envía inversor 1 y scb 19-36 para todas las PS excepto la PS1.
+    if (detectInv === 1 && detectScb > 18) {
+        detectInv = 2;
+        detectScb -= 18;
+    }
+
     const key = `${normPs}-${detectInv}-${detectScb}`;
     return FIFTEEN_STRING_SCBS.has(key);
 }

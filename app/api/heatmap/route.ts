@@ -15,6 +15,7 @@ export async function GET() {
         `
             SELECT *
             FROM lecturas_live
+            WHERE power_station LIKE 'PS%' AND NOT (power_station = 'PS1' AND inversor = 1 AND scb > 18)
             ORDER BY length(power_station), power_station, inversor, scb
         `
       )
@@ -81,13 +82,13 @@ export async function GET() {
       ].map(s => (s ?? 0) / 100); // Fix: Scale strings by 100
 
       // 3. CAMBIO: DETECCIÓN DE INVERSOR REAL (SCB > 18 = INV 2)
-      // El backend reporta todo como Inv 1, pero sabemos que SCB 19-36 son Inv 2.
       let finalInversor = cell.inversor;
       let finalScb = cell.scb;
 
-      if (cell.scb > 18) {
+      // Map Rust backend representation (inv 1, scb 19-36) to logical representation (inv 2, scb 1-18)
+      if (finalInversor === 1 && finalScb > 18) {
         finalInversor = 2;
-        finalScb = cell.scb; // Mantenemos el número original (19-36)
+        finalScb -= 18;
       }
 
       return {

@@ -57,5 +57,6 @@ export interface PsSummary {
     name: string;      // "PS1"
     total_amps: number;
     scb_count: number;
+    dead_strings: number;
     status: 'healthy' | 'warning' | 'critical';
 }

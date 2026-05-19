@@ -1,39 +1,55 @@
-export function translateAlarmMessage(code: string, rawMessage: string): string {
-    // 1. Limpieza básica
+export interface AlarmTranslation {
+    title: string;
+    action: string;
+}
+
+export function translateAlarmMessage(code: string, rawMessage: string): AlarmTranslation {
     const lowerMsg = rawMessage.toLowerCase();
 
-    // 2. Mapeos específicos por Código
-    if (code === 'OFFLINE') return 'Sin Conexión';
-    if (code === 'READ_FAIL') return 'Fallo de Lectura';
+    if (code === 'OFFLINE') return {
+        title: 'Pérdida de Comunicación Modbus',
+        action: 'Revisar cableado RS485 de la caja, verificar alimentación eléctrica o reiniciar el data logger.'
+    };
+    
+    if (code === 'READ_FAIL' || code === 'DEVICE_FAILURE' || lowerMsg.includes('device_failure')) return {
+        title: 'Fallo de Lectura / Dispositivo',
+        action: 'El dispositivo no responde a las peticiones Modbus. Verificar interferencia o reiniciar equipo.'
+    };
 
-    // 3. Traducción basada en contenido del mensaje (Heurística)
-    if (lowerMsg.includes('offline') && lowerMsg.includes('fallos')) {
-        // Ej: "Offline 45 fallos seguidos" -> "Dispositivo desconectado"
-        return 'Dispositivo desconectado';
-    }
+    if (lowerMsg.includes('offline') && lowerMsg.includes('fallos')) return {
+        title: 'Dispositivo Desconectado',
+        action: 'Pérdida persistente de señal. Enviar técnico para verificar estado de la caja.'
+    };
 
-    if (lowerMsg.includes('baja_tension')) return 'Baja Tensión Detectada';
-    if (lowerMsg.includes('alerta_0a') || lowerMsg.includes('zero current')) return 'Alerta: Corriente Cero (Posible Fusible Abierto)';
-    if (lowerMsg.includes('alerta_strings')) return 'Alerta: Fallo en Strings';
+    if (lowerMsg.includes('baja_tension') || code === 'BAJA_TENSION') return {
+        title: 'Caída Severa de Tensión DC',
+        action: 'Sombra extrema, strings desconectados masivamente o fallo en inversor central. Verificar si hay Curtailment.'
+    };
 
-    // CASOS NUEVOS
-    if (code === 'DEVICE_FAILURE' || lowerMsg.includes('device_failure')) {
-        return 'Fallo de Dispositivo (Error Interno del Esclavo)';
-    }
+    if (lowerMsg.includes('alerta_0a') || lowerMsg.includes('zero current') || code === 'FUSIBLE' || lowerMsg.includes('fusible')) return {
+        title: 'Fusible Abierto o String Cortado',
+        action: 'Se detectó corriente cero en plena producción. Revisar continuidad del cable y estado del fusible cilíndrico.'
+    };
+
+    if (lowerMsg.includes('alerta_strings')) return {
+        title: 'Anomalía en Producción de Strings',
+        action: 'Desviación térmica o degradación detectada. Sugerimos limpieza de paneles o revisión de diodos bypass.'
+    };
 
     if (code === 'MANY_ZERO_STRINGS' || lowerMsg.includes('many_zero_strings')) {
-        // "Muchos strings en 0 (13 >= 4)" -> Extraer el número real
         const match = rawMessage.match(/\((\d+)\s*≥\s*\d+\)/);
         const count = match ? match[1] : '?';
-        return `Múltiples Strings sin corriente (${count} detectados)`;
+        return {
+            title: `Múltiples Strings sin corriente (${count} detectados)`,
+            action: 'Posible sombra severa local o fallo en los tableros de conexión de la SCB.'
+        };
     }
 
-    if (lowerMsg.includes('posible')) {
-        return rawMessage.replace('POSIBLE', 'Posible').replace('FUSIBLE', 'Fusible');
-    }
-
-    // 4. Fallback: Retornar mensaje original pero "Bonito" (Capitalizado)
-    return rawMessage.charAt(0).toUpperCase() + rawMessage.slice(1).toLowerCase();
+    // Fallback
+    return {
+        title: rawMessage.charAt(0).toUpperCase() + rawMessage.slice(1).toLowerCase(),
+        action: 'Investigar estado reportado en el registro crudo.'
+    };
 }
 
 export function getSeverityLabel(severity: number): { label: string, color: string } {
