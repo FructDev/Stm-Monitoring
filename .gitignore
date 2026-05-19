@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+pv_14ps_live.db 
+pv_14ps_live.db 
+pv_historical.db
