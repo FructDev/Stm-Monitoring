@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import db from "@/app/lib/db";
+import stateDb from "@/app/lib/stateDb";
 
 export const dynamic = "force-dynamic";
 
@@ -15,33 +16,35 @@ export async function GET(request: NextRequest) {
       .prepare(
         `
       SELECT * FROM lecturas_live 
-      WHERE power_station = ? 
+      WHERE power_station = ? AND NOT (power_station = 'PS1' AND inversor = 1 AND scb > 18)
     `
       )
       .all(psName) as any[];
 
-    const UMBRAL_SEGUNDOS = 36000000; // 15 Minutos
+    // Fetch manual reviews map
+    const reviewsMap: any = {};
+    const reviewRows = stateDb.prepare("SELECT * FROM scb_manual_reviews WHERE power_station = ?").all(psName);
+    reviewRows.forEach((r: any) => {
+        if (!reviewsMap[r.inversor]) reviewsMap[r.inversor] = {};
+        if (!reviewsMap[r.inversor][r.scb]) reviewsMap[r.inversor][r.scb] = {};
+        reviewsMap[r.inversor][r.scb][r.card_id] = r.last_review_ts;
+    });
+
+    const UMBRAL_SEGUNDOS = 900; // 15 Minutos en segundos
     const now = new Date().getTime();
 
-    // Deduplicación vital: 
-    // Como V1 insertó Inversor 1 con SCB 19-36 y V2 inserta directamente
-    // Inversor 2 con SCB 1-18, si aplicamos el mapeo ambos terminan en la misma URL física.
     // Usamos un Hash Map para agrupar por (inversor-scb) físico y quedarnos solo con el más reciente.
     const uniqueMap = new Map();
 
     rows.forEach((row) => {
       let mappedInversor = row.inversor;
       let mappedScb = row.scb;
-      const normPs = String(row.power_station).replace(/\s+/g, '').toUpperCase();
 
-      if (mappedScb > 18) {
-        mappedInversor = 2; // Mapeo legado de V1
-        if (normPs === 'PS1') {
-          if (mappedScb >= 27 && mappedScb <= 36) mappedScb = mappedScb - 26;
-          else if (mappedScb >= 19 && mappedScb <= 26) mappedScb = mappedScb - 8;
-        } else {
-          mappedScb = mappedScb - 18;
-        }
+      // Mapear la representación de Rust (inv 1, scb 19-36) a representación lógica (inv 2, scb 1-18)
+      // Esto aplica para todas las PS excepto la PS1 (porque Rust ya manda inv 2 para la PS1)
+      if (mappedInversor === 1 && mappedScb > 18) {
+        mappedInversor = 2;
+        mappedScb -= 18;
       }
 
       const key = `${mappedInversor}-${mappedScb}`;
@@ -57,30 +60,51 @@ export async function GET(request: NextRequest) {
       }
     });
 
-    const processedRows = Array.from(uniqueMap.values()).map((row) => {
-      const rowTime = new Date(row.ts).getTime();
-      const secondsDiff = (now - rowTime) / 1000;
-
-      // Si es zombie (> 15 min), forzamos OFFLINE visual
-      if (secondsDiff > UMBRAL_SEGUNDOS) {
-        return {
-          ...row,
-          estado: "OFFLINE",
-          i_total: 0,
-          vdc: 0,
-          fail_count: 99,
-        };
+    // Garantizar la matriz completa de 36 cajas (Inv 1 y 2, SCB 1 a 18)
+    const finalRows = [];
+    for (let inv = 1; inv <= 2; inv++) {
+      for (let s = 1; s <= 18; s++) {
+        const key = `${inv}-${s}`;
+        const existingRow = uniqueMap.get(key);
+        
+        if (existingRow) {
+          const rowTime = new Date(existingRow.ts).getTime();
+          const secondsDiff = (now - rowTime) / 1000;
+          
+          if (secondsDiff > UMBRAL_SEGUNDOS) {
+            finalRows.push({
+              ...existingRow,
+              estado: "OFFLINE",
+              i_total: 0,
+              vdc: 0,
+              fail_count: 99,
+            });
+          } else {
+            finalRows.push(existingRow);
+          }
+        } else {
+          // Inyectar caja sintética OFFLINE si falta por completo en SQLite (ej. Rust la omitió)
+          finalRows.push({
+            power_station: psName,
+            inversor: inv,
+            scb: s,
+            estado: "OFFLINE",
+            i_total: 0,
+            vdc: 0,
+            ts: new Date().toISOString(),
+            fail_count: 99,
+            manual_reviews: reviewsMap[inv]?.[s]
+          });
+        }
       }
-      return row;
+    }
+    
+    // Attach reviews to existing rows too
+    finalRows.forEach(r => {
+      r.manual_reviews = reviewsMap[r.inversor]?.[r.scb];
     });
 
-    // Sort manual ya que agrupar rompe el ORDER BY de SQL
-    processedRows.sort((a, b) => {
-      if (a.inversor !== b.inversor) return a.inversor - b.inversor;
-      return a.scb - b.scb;
-    });
-
-    return NextResponse.json(processedRows);
+    return NextResponse.json(finalRows);
   } catch (error) {
     console.error(error);
     return NextResponse.json({ error: "Error interno" }, { status: 500 });

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import db from '@/app/lib/db';
+import stateDb from '@/app/lib/stateDb';
 import { ActiveAlarm, AlarmSummary } from '@/app/types/alarms';
 import { analyzeScb } from '@/app/lib/analytics';
 
@@ -9,11 +10,77 @@ export async function GET() {
     try {
         // 1. Fetch Live Readings instead of empty alarm_state
         // We synthesize alarms from the live data since the backend isn't populating alarm_state
-        const readings = db.prepare(`
+        const rawReadings = db.prepare(`
             SELECT * FROM lecturas_live 
             WHERE power_station LIKE 'PS%' AND NOT (power_station = 'PS1' AND inversor = 1 AND scb > 18)
-            ORDER BY power_station, inversor, scb
         `).all() as any[];
+
+        const now = new Date().getTime();
+        const UMBRAL_SEGUNDOS = 900; // 15 Minutos en segundos
+
+        // Construir mapa de lecturas con mapeo lógico de SCBs
+        const lookup = new Map();
+        
+        // Fetch manual reviews map
+        const reviewsMap: any = {};
+        const reviewRows = stateDb.prepare("SELECT * FROM scb_manual_reviews").all();
+        reviewRows.forEach((r: any) => {
+            if (!reviewsMap[r.power_station]) reviewsMap[r.power_station] = {};
+            if (!reviewsMap[r.power_station][r.inversor]) reviewsMap[r.power_station][r.inversor] = {};
+            if (!reviewsMap[r.power_station][r.inversor][r.scb]) reviewsMap[r.power_station][r.inversor][r.scb] = {};
+            reviewsMap[r.power_station][r.inversor][r.scb][r.card_id] = r.last_review_ts;
+        });
+
+        rawReadings.forEach((r) => {
+            let inv = r.inversor;
+            let s = r.scb;
+            if (inv === 1 && s > 18) {
+                inv = 2;
+                s -= 18;
+            }
+            const key = `${r.power_station}-${inv}-${s}`;
+            
+            const existing = lookup.get(key);
+            const rowTime = new Date(r.ts).getTime();
+            if (!existing || rowTime > new Date(existing.ts).getTime()) {
+                lookup.set(key, r);
+            }
+        });
+
+        // Garantizar las 504 cajas y aplicar lógica zombie
+        const readings: any[] = [];
+        for (let p = 1; p <= 14; p++) {
+            const psName = `PS${p}`;
+            for (let inv = 1; inv <= 2; inv++) {
+                for (let s = 1; s <= 18; s++) {
+                    const key = `${psName}-${inv}-${s}`;
+                    let r = lookup.get(key);
+
+                    if (!r) {
+                        // Inyectar caja perdida
+                        r = {
+                            power_station: psName,
+                            inversor: inv,
+                            scb: s,
+                            estado: 'OFFLINE',
+                            ts: new Date().toISOString(),
+                            i_total: 0
+                        };
+                    } else {
+                        // Chequeo Zombie
+                        const rowTime = new Date(r.ts).getTime();
+                        if ((now - rowTime) / 1000 > UMBRAL_SEGUNDOS) {
+                            r.estado = 'OFFLINE';
+                            r.i_total = 0;
+                        }
+                    }
+                    // Forzar inversor y scb lógicos para las alarmas
+                    r.inversor = inv;
+                    r.scb = s;
+                    readings.push(r);
+                }
+            }
+        }
 
         // Calculamos la corriente total del parque para saber si es de noche
         const totalParkAmps = readings.reduce((acc, r) => acc + ((r.i_total ?? 0) / 100), 0);
@@ -22,7 +89,7 @@ export async function GET() {
         const alarms: ActiveAlarm[] = [];
 
         readings.forEach(r => {
-            // 1. ALARMAS DE ESTADO (Provenientes del backend Python)
+            // 1. ALARMAS DE ESTADO (Provenientes del backend Python o Inyectadas)
             if (r.estado !== 'OK' && r.estado !== 'ONLINE' && r.estado !== null) {
                 // Supresión inteligente
                 if (!(r.estado === 'BAJA_TENSION' && isNightTime)) {
@@ -68,7 +135,9 @@ export async function GET() {
             // 2. ALARMAS SINTÉTICAS (Cálculo Analítico de Strings)
             // Evaluamos strings solo si la caja SÍ está comunicando (no offline/fail)
             if (r.estado !== 'OFFLINE' && r.estado !== 'READ_FAIL' && r.estado !== 'FAIL') {
+                r.manual_reviews = reviewsMap[r.power_station]?.[r.inversor]?.[r.scb];
                 const analysis = analyzeScb(r);
+                
                 if (analysis.deadStrings > 0) {
                     alarms.push({
                         power_station: r.power_station,
@@ -79,6 +148,25 @@ export async function GET() {
                         active: 1,
                         severity: 2, // Warning
                         message: `Múltiples Strings sin corriente (${analysis.deadStrings} detectados)`,
+                        start_ts: r.ts,
+                        last_seen_ts: r.ts,
+                        first_seen_ts: r.ts,
+                        acknowledged: 0,
+                        ack: 0,
+                        modbus_id: r.modbus_id || 0
+                    });
+                }
+
+                if (analysis.expiredReviewCards && analysis.expiredReviewCards.length > 0) {
+                    alarms.push({
+                        power_station: r.power_station,
+                        inversor: r.inversor,
+                        scb: r.scb,
+                        alarm_code: 'REVISION_VENCIDA',
+                        details: '',
+                        active: 1,
+                        severity: 3, // Critical
+                        message: `Revisión manual caducada en tarjeta STM-SP ${analysis.expiredReviewCards.join(', ')}`,
                         start_ts: r.ts,
                         last_seen_ts: r.ts,
                         first_seen_ts: r.ts,

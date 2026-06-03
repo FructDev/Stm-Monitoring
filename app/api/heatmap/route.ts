@@ -49,7 +49,7 @@ export async function GET() {
     const globalAvg = activeCount > 0 ? globalSumAmps / activeCount : 0;
 
     // Segunda pasada: Formatear para el Frontend
-    const finalData = cells.map((cell: any) => {
+    const existingFinalData = cells.map((cell: any) => {
       let performance = 0;
       // Note: cell.i_total is still raw here, need to scale for performance calc against scaled globalAvg
       const cellAmps = (cell.i_total ?? 0) / 100;
@@ -61,24 +61,9 @@ export async function GET() {
       // 2. CAMBIO: Empaquetar los 18 strings en un array limpio
       // Esto es lo que leerá tu función findDeadStrings en el frontend
       const stringValues = [
-        cell.s01,
-        cell.s02,
-        cell.s03,
-        cell.s04,
-        cell.s05,
-        cell.s06,
-        cell.s07,
-        cell.s08,
-        cell.s09,
-        cell.s10,
-        cell.s11,
-        cell.s12,
-        cell.s13,
-        cell.s14,
-        cell.s15,
-        cell.s16,
-        cell.s17,
-        cell.s18,
+        cell.s01, cell.s02, cell.s03, cell.s04, cell.s05, cell.s06,
+        cell.s07, cell.s08, cell.s09, cell.s10, cell.s11, cell.s12,
+        cell.s13, cell.s14, cell.s15, cell.s16, cell.s17, cell.s18,
       ].map(s => (s ?? 0) / 100); // Fix: Scale strings by 100
 
       // 3. CAMBIO: DETECCIÓN DE INVERSOR REAL (SCB > 18 = INV 2)
@@ -103,6 +88,35 @@ export async function GET() {
         strings: stringValues, // <--- AQUÍ ESTÁ LA DATA PARA EL EXCEL
       };
     });
+
+    // Tercera pasada: Inyectar cajas faltantes para garantizar las 504 completas
+    const finalData = [];
+    const lookup = new Map(existingFinalData.map(c => [c.id, c]));
+
+    for (let p = 1; p <= 14; p++) {
+      const psName = `PS${p}`;
+      for (let inv = 1; inv <= 2; inv++) {
+        for (let s = 1; s <= 18; s++) {
+          const id = `${psName}-${inv}-${s}`;
+          if (lookup.has(id)) {
+            finalData.push(lookup.get(id));
+          } else {
+            // Inyectar caja sintética OFFLINE si falta
+            finalData.push({
+              id,
+              ps: psName,
+              inversor: inv,
+              scb: s,
+              amps: 0,
+              vdc: 0,
+              status: "OFFLINE",
+              perf: 0,
+              strings: new Array(18).fill(0),
+            });
+          }
+        }
+      }
+    }
 
     return NextResponse.json({
       stats: finalData,

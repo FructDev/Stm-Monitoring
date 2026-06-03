@@ -15,6 +15,10 @@ export interface ScbAnalysis {
 
     efficiency: number;      // % Eficiencia (0-100)
     dailyLostMWh: number;    // Proyección pérdida diaria
+
+    assumedGoodStrings: number[]; // Strings que están en 0 pero asumimos buenos por fallo de tarjeta
+    suspectedDeadCards: number[]; // IDs de tarjetas sospechosas (1 a 5)
+    expiredReviewCards: number[]; // Tarjetas que expiró su revisión de 7 días
 }
 
 export function analyzeScb(scb: ScbData): ScbAnalysis {
@@ -46,21 +50,83 @@ export function analyzeScb(scb: ScbData): ScbAnalysis {
         }
     }
 
-    let dead = 0;
-    let low = 0;
     let idealStringAmps = 0;
+    const stringStatus = new Array(capacity).fill('ok');
 
-    // Si la caja no produce suficiente (ej < 5A global) o no hay strings válidos, no juzgamos muertos para evitar falsos positivos
-    if (i_total > 5 && validStringsCount > 0) {
+    // Si la caja no produce suficiente o no hay strings válidos, no juzgamos muertos para evitar falsos positivos
+    if (validStringsCount > 0) {
         idealStringAmps = sumValidAmps / validStringsCount;
-        const failureThreshold = idealStringAmps * 0.20; // < 20% = Fusible abierto
-        const lowPerfThreshold = idealStringAmps * 0.70; // < 70% = Degradación/Sombra
+        
+        // Umbrales relativos al promedio "sano"
+        // Ej: Si el promedio sano es 8A, un fallo es < 1.6A
+        const failureThreshold = idealStringAmps * 0.20; // 20% del promedio
+        const lowPerfThreshold = idealStringAmps * 0.70; // 70% del promedio
 
-        currents.forEach(val => {
-            if (val < failureThreshold) dead++;
-            else if (val < lowPerfThreshold) low++;
+        // Segunda pasada: Evaluar contra los umbrales
+        currents.forEach((val, i) => {
+            if (val < failureThreshold) {
+                stringStatus[i] = 'dead';
+            } else if (val < lowPerfThreshold) {
+                stringStatus[i] = 'low';
+            }
         });
     }
+
+    // --- NUEVA LÓGICA: DETECCIÓN DE TARJETAS STM-SP ---
+    const cardGroups = [
+        [0, 1, 2, 3],     // Tarjeta 1
+        [4, 5, 6, 7],     // Tarjeta 2
+        [8, 9, 10, 11],   // Tarjeta 3
+        [12, 13, 14, 15], // Tarjeta 4
+        [16, 17]          // Tarjeta 5
+    ];
+
+    const assumedGoodStrings: number[] = [];
+    const suspectedDeadCards: number[] = [];
+    const expiredReviewCards: number[] = [];
+
+    const nowMs = new Date().getTime();
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+    cardGroups.forEach((group, cardIdx) => {
+        const cardId = cardIdx + 1;
+        const validGroup = group.filter(i => i < capacity);
+        if (validGroup.length === 0) return;
+
+        const isCardDead = validGroup.every(i => stringStatus[i] === 'dead');
+
+        if (isCardDead && validStringsCount > 0) {
+            suspectedDeadCards.push(cardId);
+            
+            // Check review status
+            const reviewTs = scb.manual_reviews?.[cardId];
+            let isExpired = true;
+
+            if (reviewTs) {
+                const reviewTime = new Date(reviewTs).getTime();
+                if (nowMs - reviewTime <= SEVEN_DAYS_MS) {
+                    isExpired = false;
+                }
+            }
+
+            if (isExpired) {
+                expiredReviewCards.push(cardId);
+            } else {
+                // Not expired! Assumed Good.
+                validGroup.forEach(i => {
+                    stringStatus[i] = 'assumed_good';
+                    assumedGoodStrings.push(i + 1); // 1-indexed string number
+                });
+            }
+        }
+    });
+
+    let dead = 0;
+    let low = 0;
+    stringStatus.forEach(s => {
+        if (s === 'dead') dead++;
+        if (s === 'low') low++;
+    });
 
     // 4. Cálculos de Potencia (P = V * I) / 1000 = kW
     const actualKW = (i_total * vdc) / 1000;
@@ -79,13 +145,16 @@ export function analyzeScb(scb: ScbData): ScbAnalysis {
     const dailyLostMWh = (lostKW * HORAS_SOL_PICO) / 1000;
 
     return {
-        activeStrings: capacity - dead - low,
+        activeStrings: capacity - dead - low - assumedGoodStrings.length,
         deadStrings: dead,
         lowPerfStrings: low,
         actualPowerKW: actualKW,
         potentialPowerKW: potentialKW,
         lostPowerKW: lostKW,
         efficiency: efficiency,
-        dailyLostMWh: dailyLostMWh
+        dailyLostMWh: dailyLostMWh,
+        assumedGoodStrings,
+        suspectedDeadCards,
+        expiredReviewCards
     };
 }

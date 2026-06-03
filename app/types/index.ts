@@ -24,6 +24,7 @@ export interface ScbData {
     expected_current?: number;
     health_score_pct?: number;
     currents?: number[];
+    manual_reviews?: Record<number, string>; // card_id -> timestamp (ISO)
 }
 
 export interface MeteoData {

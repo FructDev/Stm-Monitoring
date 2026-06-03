@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import db from "@/app/lib/db";
 import { PsSummary } from "@/app/types";
 import { getScbCapacity } from "@/app/lib/scb-config";
+import stateDb from "@/app/lib/stateDb";
+import { analyzeScb } from "@/app/lib/analytics";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +21,17 @@ export async function GET() {
     `
       )
       .all() as any[];
+
+    // Fetch manual reviews map
+    const reviewsMap: any = {};
+    const reviewRows = stateDb.prepare("SELECT * FROM scb_manual_reviews").all();
+    reviewRows.forEach((r: any) => {
+        if (!reviewsMap[r.power_station]) reviewsMap[r.power_station] = {};
+        if (!reviewsMap[r.power_station][r.inversor]) reviewsMap[r.power_station][r.inversor] = {};
+        if (!reviewsMap[r.power_station][r.inversor][r.scb]) reviewsMap[r.power_station][r.inversor][r.scb] = {};
+        
+        reviewsMap[r.power_station][r.inversor][r.scb][r.card_id] = r.last_review_ts;
+    });
 
     const now = new Date().getTime();
 
@@ -91,54 +104,52 @@ export async function GET() {
         }
 
         // Alertas de Caja
-        if (row.estado !== "OK" && row.estado !== "BAJA_TENSION") {
+        if (row.estado !== "OK" && row.estado !== "ONLINE" && row.estado !== "BAJA_TENSION") {
           alert_scbs++;
           ps.alert_count++;
         }
 
-        // 🔥 NUEVA LÓGICA DE STRINGS DAÑADOS (Estadística Relativa)
-        // Ignoramos la caja si tiene una corriente muy baja (< 5A global) 
-        // para evitar falsos positivos en el amanecer/atardecer o nubes.
-        if (amps > 5) {
-          const capacity = getScbCapacity(row.power_station, row.inversor, row.scb);
-          
-          let validStringsCount = 0;
-          let sumValidAmps = 0;
-          const stringValues: number[] = [];
-
-          // Primera pasada: recolectar datos reales y calcular promedio sano
-          for (let i = 0; i < capacity; i++) {
-            const key = `s${String(i + 1).padStart(2, "0")}`;
-            const rawVal = row[key];
-            
-            // Ignorar explícitamente nulos (falsos positivos por nulidad de getScbCapacity)
-            if (rawVal === null || rawVal === undefined) continue;
-            
-            const val = rawVal / 100;
-            stringValues.push(val);
-            
-            // Promediamos usando los strings vivos (>0.5)
-            if (val >= 0.5) {
-                sumValidAmps += val;
-                validStringsCount++;
-            }
-          }
-
-          if (validStringsCount > 0) {
-            const avgHealthyCurrent = sumValidAmps / validStringsCount;
-            const failureThreshold = avgHealthyCurrent * 0.20; // 20% del promedio
-
-            let deadInBox = 0;
-            for (const val of stringValues) {
-                if (val < failureThreshold) {
-                    deadInBox++;
-                }
-            }
-
-            total_dead_strings += deadInBox;
-            ps.dead_strings_count += deadInBox;
-          }
+        // 🔥 NUEVA LÓGICA DE STRINGS DAÑADOS (Estadística Relativa + Fallo de Tarjetas)
+        let finalInversor = row.inversor;
+        let finalScb = row.scb;
+        if (finalInversor === 1 && finalScb > 18) {
+            finalInversor = 2;
+            finalScb -= 18;
         }
+        
+        // Adjuntar revisiones manuales
+        row.manual_reviews = reviewsMap[row.power_station]?.[finalInversor]?.[finalScb];
+        
+        const analysis = analyzeScb(row);
+        
+        total_dead_strings += analysis.deadStrings;
+        ps.dead_strings_count += analysis.deadStrings;
+      }
+    }
+
+    // 🔥 INYECTAR CAJAS FALTANTES PARA GARANTIZAR 504 TOTALES
+    for (let p = 1; p <= 14; p++) {
+      const psName = `PS${p}`;
+      const ps = stationMap[psName];
+      if (ps) {
+        if (ps.scb_count < 36) {
+          const missing = 36 - ps.scb_count;
+          ps.scb_count += missing;
+          ps.offline_count += missing;
+          total_scbs += missing;
+          offline_scbs += missing;
+        }
+      } else {
+        stationMap[psName] = {
+          total_amps: 0,
+          scb_count: 36,
+          offline_count: 36,
+          alert_count: 0,
+          dead_strings_count: 0,
+          last_ts: new Date().toISOString()
+        };
+        total_scbs += 36;
+        offline_scbs += 36;
       }
     }
 

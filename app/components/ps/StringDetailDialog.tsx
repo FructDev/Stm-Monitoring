@@ -6,6 +6,7 @@ import { HistoricalChart } from "./HistoricalChart";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { LineChart as LineChartIcon } from "lucide-react";
+import { analyzeScb } from "@/app/lib/analytics";
 
 interface Props {
     scb: ScbData | null;
@@ -16,32 +17,71 @@ interface Props {
 export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
     const [showChart, setShowChart] = useState(false);
     const [activeString, setActiveString] = useState<number | null>(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
 
     if (!scb) return null;
 
-    // --- PROTECCIÓN CONTRA NULOS (Defensive Programming) ---
-    // Si la caja está offline, estos valores vienen NULL. Usamos 0.
-    const safe_i_total = (scb.i_total ?? 0) / 100; // Fix: Dividir por 100
+    // --- PROTECCIÓN CONTRA NULOS ---
+    const safe_i_total = (scb.i_total ?? 0) / 100;
     const safe_vdc = scb.vdc ?? 0;
     const safe_temp = scb.temp_c ?? 0;
-    const safe_avg = (scb.i_avg ?? 0) / 100; // Fix: Dividir por 100 para consistencia
+    const safe_avg = (scb.i_avg ?? 0) / 100;
 
-    // Determinar Capacidad (15 o 18)
     const capacity = getScbCapacity(scb.power_station, scb.inversor, scb.scb);
+    const analysis = analyzeScb(scb);
 
-    // Extraer valores de strings dinámicamente con protección
-    // Siempre generamos 18 slots para mantener la UI consistente (6x3)
+    const assumedGood = analysis.assumedGoodStrings || [];
+    const suspectedCards = analysis.suspectedDeadCards || [];
+    const expiredCards = analysis.expiredReviewCards || [];
+
     const strings = Array.from({ length: 18 }, (_, i) => {
         const id = i + 1;
         const key = `s${String(id).padStart(2, '0')}` as keyof ScbData;
         const rawVal = scb[key];
         const val = typeof rawVal === 'number' ? rawVal / 100 : 0;
-
-        // Es válido si el ID está dentro de la capacidad (ej: id <= 15)
         const isValid = id <= capacity;
-
         return { id, val, isValid };
     });
+
+    const registrarRevision = async (cardId: number) => {
+        setIsSubmitting(true);
+        try {
+            // Mapeo inversores si es PS antigua
+            let finalInversor = scb.inversor;
+            let finalScb = scb.scb;
+            if (finalInversor === 1 && finalScb > 18) {
+                finalInversor = 2;
+                finalScb -= 18;
+            }
+
+            await fetch('/api/reviews', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    power_station: scb.power_station,
+                    inversor: finalInversor,
+                    scb: finalScb,
+                    card_id: cardId
+                })
+            });
+            window.location.reload();
+        } catch (e) {
+            console.error(e);
+            setIsSubmitting(false);
+        }
+    }
+
+    function getStringColor(val: number, avg: number, id: number) {
+        if (assumedGood.includes(id)) return 'bg-purple-950/40 border-purple-900 text-purple-400';
+        if (val === 0) {
+            // Check if it belongs to an expired card
+            const cardId = Math.floor((id - 1) / 4) + 1;
+            if (expiredCards.includes(cardId)) return 'bg-rose-950/40 border-rose-900 text-rose-500 animate-pulse';
+            return 'bg-rose-950/40 border-rose-900 text-rose-500';
+        }
+        if (avg > 1 && val < avg * 0.7) return 'bg-orange-950/40 border-orange-900 text-orange-400'; // Sucio/Sombra
+        return 'bg-emerald-950/30 border-emerald-900/50 text-emerald-400'; // OK
+    }
 
     return (
         <Dialog open={isOpen} onOpenChange={onClose}>
@@ -60,87 +100,127 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                     </DialogTitle>
                 </DialogHeader>
 
-                {/* Métricas Generales (Usamos las variables seguras 'safe_...') */}
-                <div className="grid grid-cols-3 gap-4 mb-6">
-                    <MetricBox icon={<Zap className="text-yellow-500" />} label="Corriente Total" value={`${safe_i_total.toFixed(1)} A`} />
-                    <MetricBox icon={<Activity className="text-blue-500" />} label="Voltaje DC" value={`${safe_vdc.toFixed(0)} V`} />
-                    <MetricBox icon={<Thermometer className="text-rose-500" />} label="Temperatura" value={`${safe_temp.toFixed(1)} °C`} />
-                </div>
+                <div className="overflow-y-auto max-h-[65vh] pr-2 -mr-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-slate-900/40 [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-slate-600">
+                    <div className="grid grid-cols-3 gap-4 mb-4 mt-1">
+                        <MetricBox icon={<Zap className="text-yellow-500" />} label="Corriente Total" value={`${safe_i_total.toFixed(1)} A`} />
+                        <MetricBox icon={<Activity className="text-blue-500" />} label="Voltaje DC" value={`${safe_vdc.toFixed(0)} V`} />
+                        <MetricBox icon={<Thermometer className="text-rose-500" />} label="Temperatura" value={`${safe_temp.toFixed(1)} °C`} />
+                    </div>
 
-                {/* Grid de 18 Strings */}
-                <div className="space-y-2">
-                    <h4 className="flex justify-between items-center text-sm font-medium text-slate-400 uppercase tracking-wider">
-                        <span>Monitor de Fusibles (Strings)</span>
-                        {capacity < 18 && <span className="text-xs text-orange-400">Config: {capacity} Strings</span>}
-                    </h4>
-                    {scb.estado === 'OFFLINE' ? (
-                        <div className="p-8 text-center border border-dashed border-slate-800 rounded text-slate-500">
-                            Esta caja no tiene comunicación. No hay datos de strings disponibles.
+                    {/* --- DIAGNÓSTICOS IA --- */}
+                    {suspectedCards.length > 0 && (
+                        <div className="bg-purple-950/30 border border-purple-900/50 p-2.5 rounded mb-4">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <h5 className="text-purple-400 font-bold text-sm mb-0.5">⚠️ Fallo de Telemetría STM-SP</h5>
+                                    <p className="text-xs text-slate-300">
+                                        Pérdida en tarjeta(s) {suspectedCards.join(', ')}. Se asumen buenos temporalmente.
+                                    </p>
+                                </div>
+                                <div className="flex flex-wrap gap-1.5 justify-end max-w-[200px]">
+                                    {suspectedCards.map(c => (
+                                        <Button key={c} size="sm" variant="outline" disabled={isSubmitting} className="border-purple-800 text-purple-300 hover:bg-purple-900 text-xs py-0.5 h-7 px-2" onClick={() => registrarRevision(c)}>
+                                            Revisar T{c}
+                                        </Button>
+                                    ))}
+                                </div>
+                            </div>
                         </div>
-                    ) : (
-                        <div className="grid grid-cols-6 gap-2">
-                            {strings.map((s) => {
-                                const isSelected = activeString === s.id;
-                                const baseStyle = !s.isValid
-                                    ? 'bg-slate-900/50 border-slate-800 text-slate-700 cursor-not-allowed'
-                                    : getStringColor(s.val, safe_avg);
+                    )}
 
-                                const ringStyle = isSelected ? 'ring-2 ring-blue-500 scale-105 shadow-lg z-10' : 'hover:scale-105 transition-transform cursor-pointer';
+                    {expiredCards.length > 0 && (
+                        <div className="bg-rose-950/30 border border-rose-900/50 p-2.5 rounded mb-4">
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <h5 className="text-rose-500 font-bold text-sm mb-0.5">❌ Revisión Caducada</h5>
+                                    <p className="text-xs text-slate-300">
+                                        Inspección de tarjeta(s) {expiredCards.join(', ')} vencida (&gt;7 días).
+                                    </p>
+                                </div>
+                                <div className="flex flex-wrap gap-1.5 justify-end max-w-[200px]">
+                                    {expiredCards.map(c => (
+                                        <Button key={c} size="sm" variant="destructive" disabled={isSubmitting} className="text-xs py-0.5 h-7 px-2" onClick={() => registrarRevision(c)}>
+                                            Renovar T{c}
+                                        </Button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
-                                return (
-                                    <div
-                                        key={s.id}
-                                        onClick={() => {
-                                            if (s.isValid) {
-                                                setActiveString(prev => prev === s.id ? null : s.id);
-                                                setShowChart(true);
-                                            }
-                                        }}
-                                        className={`p-2 rounded border flex flex-col items-center justify-center transition-all ${baseStyle} ${s.isValid ? ringStyle : ''}`}
-                                    >
-                                        <span className={`text-xs opacity-70 mb-1 ${isSelected ? 'text-blue-300 font-bold' : ''}`}>S{s.id}</span>
-                                        <span className="font-mono font-bold text-lg">
-                                            {!s.isValid ? '--' : s.val.toFixed(1)}
-                                        </span>
-                                    </div>
-                                );
-                            })}
+                    {/* Grid de Strings */}
+                    <div className="space-y-2">
+                        <h4 className="flex justify-between items-center text-sm font-medium text-slate-400 uppercase tracking-wider">
+                            <span>Monitor de Fusibles (Strings)</span>
+                            {capacity < 18 && <span className="text-xs text-orange-400">Config: {capacity} Strings</span>}
+                        </h4>
+                        {scb.estado === 'OFFLINE' ? (
+                            <div className="p-8 text-center border border-dashed border-slate-800 rounded text-slate-500">
+                                Esta caja no tiene comunicación. No hay datos de strings disponibles.
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-6 gap-2">
+                                {strings.map((s) => {
+                                    const isSelected = activeString === s.id;
+                                    const baseStyle = !s.isValid
+                                        ? 'bg-slate-900/50 border-slate-800 text-slate-700 cursor-not-allowed'
+                                        : getStringColor(s.val, safe_avg, s.id);
+
+                                    const ringStyle = isSelected ? 'ring-2 ring-blue-500 scale-105 shadow-lg z-10' : 'hover:scale-105 transition-transform cursor-pointer';
+
+                                    return (
+                                        <div
+                                            key={s.id}
+                                            onClick={() => {
+                                                if (s.isValid) {
+                                                    setActiveString(prev => prev === s.id ? null : s.id);
+                                                    setShowChart(true);
+                                                }
+                                            }}
+                                            className={`p-2 rounded border flex flex-col items-center justify-center transition-all ${baseStyle} ${s.isValid ? ringStyle : ''}`}
+                                        >
+                                            <span className={`text-xs opacity-70 mb-1 ${isSelected ? 'text-blue-300 font-bold' : ''}`}>S{s.id}</span>
+                                            <span className="font-mono font-bold text-lg">
+                                                {!s.isValid ? '--' : s.val.toFixed(1)}
+                                            </span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="mt-4 flex justify-center">
+                        <Button
+                            variant="outline"
+                            className="bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300 gap-2"
+                            onClick={() => {
+                                if (showChart) setActiveString(null);
+                                setShowChart(!showChart);
+                            }}
+                        >
+                            <LineChartIcon className="w-4 h-4" />
+                            {showChart ? "Ocultar Histórico" : "Ver Análisis Histórico SCB"}
+                        </Button>
+                    </div>
+
+                    {showChart && (
+                        <div className="mt-4 border-t border-slate-800 pt-4 animate-in slide-in-from-top-4 duration-300">
+                            <HistoricalChart
+                                psName={scb.power_station}
+                                mid={scb.scb}
+                                inversor={scb.inversor}
+                                scbId={scb.scb}
+                                stringId={activeString || undefined}
+                            />
                         </div>
                     )}
                 </div>
-
-                <div className="mt-4 flex justify-center">
-                    <Button
-                        variant="outline"
-                        className="bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300 gap-2"
-                        onClick={() => {
-                            if (showChart) setActiveString(null);
-                            setShowChart(!showChart);
-                        }}
-                    >
-                        <LineChartIcon className="w-4 h-4" />
-                        {showChart ? "Ocultar Histórico" : "Ver Análisis Histórico SCB"}
-                    </Button>
-                </div>
-
-                {/* Gráfico Histórico */}
-                {showChart && (
-                    <div className="mt-4 border-t border-slate-800 pt-4 animate-in slide-in-from-top-4 duration-300">
-                        <HistoricalChart
-                            psName={scb.power_station}
-                            mid={scb.scb}
-                            inversor={scb.inversor}
-                            scbId={scb.scb}
-                            stringId={activeString || undefined}
-                        />
-                    </div>
-                )}
             </DialogContent>
         </Dialog>
     );
 }
 
-// Ayudantes visuales
 function MetricBox({ icon, label, value }: any) {
     return (
         <div className="bg-slate-900/50 border border-slate-800 p-3 rounded flex items-center gap-3">
@@ -154,13 +234,7 @@ function MetricBox({ icon, label, value }: any) {
 }
 
 function getStatusColor(status: string) {
-    if (status === 'OK') return 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50';
+    if (status === 'OK' || status === 'ONLINE') return 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50';
     if (status === 'OFFLINE' || status === 'READ_FAIL') return 'bg-rose-500/20 text-rose-400 border border-rose-500/50';
     return 'bg-orange-500/20 text-orange-400 border border-orange-500/50';
-}
-
-function getStringColor(val: number, avg: number) {
-    if (val === 0) return 'bg-rose-950/40 border-rose-900 text-rose-500'; // Fusible roto
-    if (avg > 1 && val < avg * 0.7) return 'bg-orange-950/40 border-orange-900 text-orange-400'; // Sucio/Sombra
-    return 'bg-emerald-950/30 border-emerald-900/50 text-emerald-400'; // OK
 }
