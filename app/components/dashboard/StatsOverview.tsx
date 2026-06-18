@@ -1,14 +1,17 @@
 'use client';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Activity, AlertOctagon, CheckCircle2, TrendingDown, Zap } from 'lucide-react';
+import { Activity, AlertOctagon, CheckCircle2, TrendingDown, Zap, Sun } from 'lucide-react';
 import { ParkStats } from '@/app/types';
+import { useScadaStream } from '@/app/hooks/useScadaStream';
 
 interface Props {
     stats: ParkStats;
 }
 
 export function StatsOverview({ stats }: Props) {
+    const { meteoData } = useScadaStream();
+
     // 1. Evitar división por cero
     const validOnlineScbs = stats.online_scbs > 0 ? stats.online_scbs : 1;
 
@@ -35,6 +38,21 @@ export function StatsOverview({ stats }: Props) {
     const finalHealth = Math.max(0, Math.min(100, healthScore));
 
     const isHighLoss = totalLossMW > 0.1;
+
+    // 4. IRRADIANCIA Y POTENCIA ACTUAL
+    const meteoStations = Object.values(meteoData);
+    let totalIrradiance = 0;
+    let meteoCount = 0;
+    meteoStations.forEach(m => {
+        if (m && typeof m.PYR001 === 'number' && m.PYR001 > 0) {
+            totalIrradiance += m.PYR001;
+            meteoCount++;
+        }
+    });
+    const avgIrradiance = meteoCount > 0 ? totalIrradiance / meteoCount : 0;
+    
+    // Potencia total en MW = Amperios totales * Voltaje promedio del parque
+    const currentPowerMW = (stats.total_amps * stats.avg_voltage) / 1_000_000;
 
     return (
         <div className="space-y-6 mb-8">
@@ -90,16 +108,24 @@ export function StatsOverview({ stats }: Props) {
                     </CardContent>
                 </Card>
 
-                {/* 4. VOLTAJE */}
+                {/* 4. IRRADIANCIA Y POTENCIA */}
                 <Card className="bg-slate-900 border-slate-800">
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-bold text-slate-200">Tensión DC</CardTitle>
-                        <Zap className="h-4 w-4 text-yellow-400" />
+                        <CardTitle className="text-sm font-bold text-slate-200">Irradiancia y Potencia</CardTitle>
+                        <Sun className="h-4 w-4 text-yellow-500" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-black text-white font-mono">{stats.avg_voltage.toFixed(0)} V</div>
-                        <p className="text-xs text-slate-400 mt-1 font-medium">
-                            Promedio de todo el parque.
+                        <div className="flex justify-between items-baseline">
+                            <div className="text-2xl font-black text-yellow-500 font-mono">
+                                {avgIrradiance.toFixed(0)} <span className="text-sm text-slate-400 font-medium">W/m²</span>
+                            </div>
+                            <div className="text-xl font-bold text-emerald-400 font-mono">
+                                {currentPowerMW.toFixed(2)} <span className="text-sm text-slate-400 font-medium">MW</span>
+                            </div>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1 font-medium flex justify-between">
+                            <span>Promedio Global</span>
+                            <span>Generación Actual</span>
                         </p>
                     </CardContent>
                 </Card>
