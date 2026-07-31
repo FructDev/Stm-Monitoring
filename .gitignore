@@ -43,3 +43,8 @@ next-env.d.ts
 pv_14ps_live.db 
 pv_14ps_live.db 
 pv_historical.db
+# --- SCADA: bases de datos operativas (datos reales de planta — NUNCA versionar) ---
+/data/*.db
+/data/*.db-wal
+/data/*.db-shm
+/data/*.jsonl
