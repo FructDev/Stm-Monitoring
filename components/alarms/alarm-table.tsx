@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { BellOff, Check } from "lucide-react";
 import {
     Table,
     TableBody,
@@ -21,6 +23,34 @@ interface Props {
 export function AlarmTable({ alarms, isLoading }: Props) {
     const [search, setSearch] = useState("");
     const [severityFilter, setSeverityFilter] = useState<number | null>(null);
+    const [acking, setAcking] = useState<Set<string>>(new Set());
+    const queryClient = useQueryClient();
+
+    const handleAck = async (alarm: ActiveAlarm) => {
+        const key = `${alarm.power_station}-${alarm.inversor}-${alarm.scb}-${alarm.alarm_code}`;
+        setAcking((prev) => new Set(prev).add(key));
+        try {
+            await fetch("/api/alarms/ack", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    power_station: alarm.power_station,
+                    inversor: alarm.inversor ?? 0,
+                    scb: alarm.scb ?? 0,
+                    alarm_code: alarm.alarm_code,
+                }),
+            });
+            await queryClient.invalidateQueries({ queryKey: ["activeAlarms"] });
+        } catch (e) {
+            console.error("Error al reconocer alarma:", e);
+        } finally {
+            setAcking((prev) => {
+                const next = new Set(prev);
+                next.delete(key);
+                return next;
+            });
+        }
+    };
 
     if (isLoading) return <div className="text-slate-500 p-4">Cargando alarmas...</div>;
     if (alarms.length === 0) return <div className="text-slate-500 p-4">No hay alarmas activas. Todo en orden.</div>;
@@ -73,12 +103,13 @@ export function AlarmTable({ alarms, isLoading }: Props) {
                             <TableHead className="text-slate-400">Equipo</TableHead>
                             <TableHead className="text-slate-400">Diagnóstico NOC</TableHead>
                             <TableHead className="text-right text-slate-400">Última Vez</TableHead>
+                            <TableHead className="text-right text-slate-400">Acción</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
                         {filteredAlarms.length === 0 ? (
                             <TableRow>
-                                <TableCell colSpan={4} className="h-24 text-center text-slate-500">
+                                <TableCell colSpan={5} className="h-24 text-center text-slate-500">
                                     No se encontraron alarmas con estos filtros.
                                 </TableCell>
                             </TableRow>
@@ -116,6 +147,22 @@ export function AlarmTable({ alarms, isLoading }: Props) {
                                         </TableCell>
                                         <TableCell className="text-right text-xs text-slate-500">
                                             {new Date(alarm.last_seen_ts).toLocaleString()}
+                                        </TableCell>
+                                        <TableCell className="text-right">
+                                            {alarm.ack === 1 ? (
+                                                <span className="inline-flex items-center gap-1 text-xs text-emerald-500/80">
+                                                    <Check className="h-3.5 w-3.5" /> Reconocida
+                                                </span>
+                                            ) : (
+                                                <button
+                                                    onClick={() => handleAck(alarm)}
+                                                    disabled={acking.has(`${alarm.power_station}-${alarm.inversor}-${alarm.scb}-${alarm.alarm_code}`)}
+                                                    className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:bg-slate-800 hover:text-white disabled:opacity-50"
+                                                    title="Silenciar esta alarma por 8 horas"
+                                                >
+                                                    <BellOff className="h-3.5 w-3.5" /> Reconocer
+                                                </button>
+                                            )}
                                         </TableCell>
                                     </TableRow>
                                 );

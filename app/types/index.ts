@@ -54,10 +54,19 @@ export interface ParkStats {
     last_update: string;
 }
 
+export interface InverterSummary {
+    inv: number;        // 1 o 2
+    state: 'ACTIVE' | 'IDLE' | 'OFFLINE' | 'WARN_VOLTAGE';
+    on: boolean;        // encendido (produciendo): ACTIVE o WARN_VOLTAGE
+    power_mw: number;   // potencia actual (proxy DC) en MW
+    amps: number;
+}
+
 export interface PsSummary {
     name: string;      // "PS1"
     total_amps: number;
     scb_count: number;
     dead_strings: number;
     status: 'healthy' | 'warning' | 'critical';
+    inverters?: InverterSummary[]; // desglose por inversor (encendido + potencia)
 }

@@ -86,22 +86,19 @@ export function HistoricalChart({ psName, mid, inversor, scbId, stringId }: Prop
         let stringCurrent = 0;
         let stringPower = 0;
         if (stringId && stringId >= 1 && stringId <= 18) {
-            // Asumiendo que rust retorna currents en 100x o normal (usamos lo que venga, 
-            // pero si hay q dividir se hará en un refactor mayor si vemos error de escala)
+            // La corriente cruda viene en centésimas de amperio (igual que en las tarjetas live);
+            // dividimos /100 para mostrar amperios reales y mantener consistencia con el resto del dashboard.
             const rawCurrent = d.currents ? d.currents[stringId - 1] : 0;
-            // Para mantener consistencia con como se muestra en live (quizás rust manda x 100)
-            // Si v_avg viene en escala, P = V * I. 
-            // Vamos a usar el valor raw de la API, si en el futuro necesita /100 se lo pasamos
-            stringCurrent = rawCurrent;
-            stringPower = (rawCurrent * d.v_avg) / 1000; // kW
+            stringCurrent = rawCurrent / 100;
+            stringPower = (stringCurrent * d.v_avg) / 1000; // kW = A_real * V / 1000
         }
 
         return {
             time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             Voltaje: d.v_avg,
-            Amperaje: d.i_total_avg,
+            Amperaje: d.i_total_avg / 100,            // corriente cruda en centésimas -> amperios reales
             AmperajeEsperado: d.expected_current ? d.expected_current : undefined,
-            Potencia: d.power_kw_avg,
+            Potencia: d.power_kw_avg / 100,           // potencia cruda (V * I_crudo) -> kW reales
             Temperatura: d.temp_avg,
             StringCurrent: stringCurrent,
             StringPower: stringPower,

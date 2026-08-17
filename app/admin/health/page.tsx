@@ -3,13 +3,14 @@ import { GatewayGrid } from "@/app/components/scada/GatewayGrid";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { HeartbeatStatus } from "@/app/components/scada/HeartbeatStatus";
 
 export default function ScadaHealthPage() {
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
-            <div className="mb-8 flex justify-between items-start">
+        <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6">
+            <div className="mb-8 flex flex-wrap justify-between items-start gap-3">
                 <div>
-                    <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
+                    <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white flex items-center gap-3">
                         <span className="h-3 w-3 rounded-full bg-emerald-500 animate-pulse"></span>
                         Estado del Sistema SCADA
                     </h1>
@@ -24,6 +25,9 @@ export default function ScadaHealthPage() {
                     </Button>
                 </Link>
             </div>
+
+            {/* Observación independiente: no modifica los estados productivos actuales. */}
+            <HeartbeatStatus />
 
             {/* KPIs Globales */}
             <HealthKPIs />

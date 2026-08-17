@@ -59,14 +59,14 @@ export default function PsDetailPage() {
     const inv2 = scbs.filter(s => s.inversor === 2);
 
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-100 p-6 pb-20">
+        <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6 pb-20">
             {/* Header Navegación */}
-            <div className="flex items-center gap-4 mb-8">
+            <div className="flex flex-wrap items-center gap-3 sm:gap-4 mb-6 sm:mb-8">
                 <Button variant="ghost" onClick={() => router.back()} className="text-slate-400 hover:text-white">
                     <ArrowLeft className="mr-2 h-4 w-4" /> Volver
                 </Button>
                 <div>
-                    <h1 className="text-3xl font-bold tracking-tight text-white">{psName}</h1>
+                    <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">{psName}</h1>
                     <p className="text-slate-500 text-sm">Análisis de Rendimiento por Inversor</p>
                 </div>
                 <div className="ml-auto flex items-center gap-2">
@@ -78,7 +78,7 @@ export default function PsDetailPage() {
             </div>
 
             {/* Grid Layout */}
-            <div className="grid gap-10 xl:grid-cols-2">
+            <div className="grid gap-6 xl:gap-10 xl:grid-cols-2">
                 {/* COLUMNA INVERSOR 1 */}
                 <section>
                     {/* Componente Forense (El WAOOO) */}

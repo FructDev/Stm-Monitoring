@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { PsSummary } from '@/app/types';
+import { PsSummary, InverterSummary } from '@/app/types';
 import { cn } from '@/app/lib/utils';
 import { useScadaStream } from '@/app/hooks/useScadaStream';
 import { useHealthThreshold } from '@/app/hooks/useHealthThreshold';
@@ -66,12 +66,46 @@ export function PsGrid({ stations }: { stations: PsSummary[] }) {
                                         <span className="text-slate-400">Corriente Generada:</span>
                                         <span className="font-mono font-bold text-emerald-400">{ps.total_amps.toFixed(1)} A</span>
                                     </div>
+
+                                    {/* Inversores: encendido (inferido por corriente) + potencia */}
+                                    {ps.inverters && ps.inverters.length > 0 && (
+                                        <div className="grid grid-cols-2 gap-1.5 mt-2">
+                                            {ps.inverters.map((iv) => (
+                                                <InverterBox key={iv.inv} iv={iv} />
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
                     </Link>
                 );
             })}
+        </div>
+    );
+}
+
+function InverterBox({ iv }: { iv: InverterSummary }) {
+    // Color e indicador según estado inferido por corriente/potencia.
+    const cfg = {
+        ACTIVE:       { dot: 'bg-emerald-500', label: 'Encendido', box: 'border-emerald-800/60 bg-emerald-950/20', pwr: 'text-emerald-400' },
+        WARN_VOLTAGE: { dot: 'bg-yellow-500',  label: 'Aviso V',   box: 'border-yellow-800/50 bg-yellow-950/10',  pwr: 'text-yellow-400' },
+        OFFLINE:      { dot: 'bg-rose-600',     label: 'Sin com.',  box: 'border-rose-900/40 bg-rose-950/10',      pwr: 'text-slate-500' },
+        IDLE:         { dot: 'bg-slate-600',    label: 'En espera', box: 'border-slate-800 bg-slate-950/50',       pwr: 'text-slate-500' },
+    }[iv.state];
+
+    return (
+        <div className={`rounded-md p-1.5 border ${cfg.box}`}>
+            <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold text-slate-300">Inv {iv.inv}</span>
+                <span className="flex items-center gap-1">
+                    <span className={`h-2 w-2 rounded-full ${cfg.dot} ${iv.on ? 'animate-pulse' : ''}`}></span>
+                    <span className="text-[9px] text-slate-400">{cfg.label}</span>
+                </span>
+            </div>
+            <div className={`font-mono font-bold text-sm mt-0.5 ${cfg.pwr}`}>
+                {iv.power_mw.toFixed(2)} <span className="text-[9px] text-slate-500 font-normal">MW</span>
+            </div>
         </div>
     );
 }

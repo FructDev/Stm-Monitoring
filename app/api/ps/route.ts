@@ -30,7 +30,9 @@ export async function GET(request: NextRequest) {
         reviewsMap[r.inversor][r.scb][r.card_id] = r.last_review_ts;
     });
 
-    const UMBRAL_SEGUNDOS = 900; // 15 Minutos en segundos
+    // Tolerancia alta: el deadband del driver hace que una SCB estable conserve un ts viejo aunque
+    // comunique. La caída real la marca el driver con estado OFFLINE/FAIL.
+    const UMBRAL_SEGUNDOS = 90000;
     const now = new Date().getTime();
 
     // Usamos un Hash Map para agrupar por (inversor-scb) físico y quedarnos solo con el más reciente.

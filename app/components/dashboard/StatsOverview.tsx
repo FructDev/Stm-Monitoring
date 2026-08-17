@@ -44,8 +44,14 @@ export function StatsOverview({ stats }: Props) {
     let totalIrradiance = 0;
     let meteoCount = 0;
     meteoStations.forEach(m => {
-        if (m && typeof m.PYR001 === 'number' && m.PYR001 > 0) {
-            totalIrradiance += m.PYR001;
+        // Usamos PYR002 (irradiancia en plano de módulo / POA): es la relevante para
+        // generación y la que reporta el SCADA (siempre mayor que la horizontal PYR001).
+        // Fallback a PYR001 si la estación no tiene sensor inclinado.
+        const irr = (m && typeof m.PYR002 === 'number' && m.PYR002 > 0)
+            ? m.PYR002
+            : (m && typeof m.PYR001 === 'number' && m.PYR001 > 0 ? m.PYR001 : null);
+        if (irr !== null) {
+            totalIrradiance += irr;
             meteoCount++;
         }
     });
@@ -56,7 +62,7 @@ export function StatsOverview({ stats }: Props) {
 
     return (
         <div className="space-y-6 mb-8">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
 
                 {/* 1. PÉRDIDAS */}
                 <Card className={`border ${isHighLoss ? 'bg-rose-950/20 border-rose-800' : 'bg-slate-900 border-slate-800'}`}>

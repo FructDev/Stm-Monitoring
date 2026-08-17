@@ -1,15 +1,17 @@
 import type { NextConfig } from "next";
 
+const driverBaseUrl = (process.env.SCADA_DRIVER_URL || 'http://127.0.0.1:3030').replace(/\/+$/, '');
+
 const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
         source: '/api/live',
-        destination: 'http://localhost:3030/live', // Proxy to Rust Driver to bypass CORS
+        destination: `${driverBaseUrl}/live`, // Proxy to Rust Driver to bypass CORS
       },
       {
         source: '/api/curtailment',
-        destination: 'http://localhost:3030/curtailment', // Proxy Curtailment POST to Rust
+        destination: `${driverBaseUrl}/curtailment`, // Proxy Curtailment POST to Rust
       },
     ];
   },

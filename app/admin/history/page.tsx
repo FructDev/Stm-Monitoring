@@ -1,679 +1,424 @@
 'use client';
 
-import React, { useState, useMemo, useEffect } from 'react';
-import { format, differenceInHours } from 'date-fns';
+import { useState, useEffect, useMemo } from 'react';
+import Link from 'next/link';
+import { format } from 'date-fns';
+import { saveAs } from 'file-saver';
 import {
-    Calendar, Plus, Settings, Monitor, Box, Database, LineChart,
-    Trash2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-    List, BarChart2, AlertCircle, Maximize, Search, Save, Download, Filter
-} from 'lucide-react';
-import {
-    LineChart as RechartsLineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
+    ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
+import { Plus, X, BarChart2, List, Loader2, ArrowLeft, Activity, Layers, Download, Sun, Sparkles } from 'lucide-react';
+import { HistLevel, HistVariable } from '@/app/lib/history-agg';
 
-// --- CONSTANTS ---
-const STATIONS = [{ id: 'ALL', label: 'Todas las Power Stations' }, ...Array.from({ length: 14 }, (_, i) => ({ id: `PS${i + 1}`, label: `Power Station ${i + 1}` }))];
-const ELEMENT_TYPES = ['Inversores', 'Cajas (SCB)', 'Strings'];
-const VARIABLES = [
-    { label: 'Corriente DC (A)', key: 'i_total_avg' },
-    { label: 'Voltaje (V)', key: 'v_avg' },
-    { label: 'Potencia (kW)', key: 'power_kw_avg' },
-    { label: 'Temperatura (°C)', key: 'temp_avg' }
+const VARIABLES: { key: HistVariable; label: string; unit: string }[] = [
+    { key: 'corriente', label: 'Corriente', unit: 'A' },
+    { key: 'voltaje', label: 'Voltaje', unit: 'V' },
+    { key: 'potencia', label: 'Potencia', unit: 'kW' },
+    { key: 'temperatura', label: 'Temperatura', unit: '°C' },
 ];
+const LEVELS: { key: HistLevel; label: string }[] = [
+    { key: 'PS', label: 'Power Station' },
+    { key: 'INV', label: 'Inversor' },
+    { key: 'SCB', label: 'SCB' },
+    { key: 'STRING', label: 'String' },
+];
+const PRESETS = [
+    { key: 'today', label: 'Hoy' }, { key: 'yesterday', label: 'Ayer' }, { key: '24h', label: '24 h' },
+    { key: '7d', label: '7 días' }, { key: '30d', label: '30 días' }, { key: 'custom', label: 'Personalizado' },
+];
+const PS_LIST = Array.from({ length: 14 }, (_, i) => `PS${i + 1}`);
+const colorFor = (i: number) => `hsl(${Math.round((i * 137.508) % 360)}, 70%, 60%)`;
 
-const YEARS = ['2023', '2024', '2025', '2026', '2027'];
-const MONTHS = Array.from({ length: 12 }, (_, i) => (i + 1).toString().padStart(2, '0'));
-const DAYS = Array.from({ length: 31 }, (_, i) => (i + 1).toString().padStart(2, '0'));
-const HOURS = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0'));
-const MINUTES = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
+interface UISeries { id: string; level: HistLevel; ps: string; inversor: number; scb: number; stringId: number; }
 
-// --- INTERFACES ---
-interface HistoryPoint {
-    ts: string;
-    gateway: string;
-    inversor: number;
-    scb: number;
-    v_avg: number;
-    i_total_avg: number;
-    power_kw_avg: number;
-    temp_avg: number;
-    [key: string]: any;
+const mkSeries = (p: Omit<UISeries, 'id'>): UISeries => ({ ...p, id: `${p.level}|${p.ps}|${p.inversor}|${p.scb}|${p.stringId}` });
+
+const labelOf = (s: UISeries): string => {
+    if (s.level === 'PS') return s.ps;
+    if (s.level === 'INV') return `${s.ps} · Inv ${s.inversor}`;
+    if (s.level === 'SCB') return `${s.ps} · Inv ${s.inversor} · SCB ${s.scb}`;
+    return `${s.ps} · Inv ${s.inversor} · SCB ${s.scb} · S${s.stringId}`;
+};
+
+function presetRange(preset: string, cs: string, ce: string): { start: Date; end: Date } {
+    const now = new Date();
+    const mid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    switch (preset) {
+        case 'today': return { start: mid, end: now };
+        case 'yesterday': { const y = new Date(mid); y.setDate(y.getDate() - 1); return { start: y, end: mid }; }
+        case '24h': return { start: new Date(now.getTime() - 24 * 3600000), end: now };
+        case '7d': return { start: new Date(now.getTime() - 7 * 86400000), end: now };
+        case '30d': return { start: new Date(now.getTime() - 30 * 86400000), end: now };
+        case 'custom': return { start: cs ? new Date(cs) : new Date(now.getTime() - 24 * 3600000), end: ce ? new Date(ce) : now };
+        default: return { start: mid, end: now };
+    }
 }
 
-interface QueryParam {
-    id: string;
-    gateway: string;
-    elementType: string;
-    elementId: string;
-    scbId?: string;
-    variableName: string;
-    variableKey: string;
-    rawKey: string;
-    labelInfo: string;
+// Correlación de Pearson (para relación variable ↔ irradiancia)
+function pearson(xs: number[], ys: number[]): number {
+    const n = xs.length;
+    if (n < 3) return NaN;
+    const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0, syy = 0;
+    for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy; }
+    const d = Math.sqrt(sxx * syy);
+    return d === 0 ? NaN : sxy / d;
 }
 
-// --- MAIN COMPONENT ---
 export default function HistoryPage() {
-    // 1. STATE: Periodo Separado por Dropdowns
-    const [startYear, setStartYear] = useState(format(new Date(Date.now() - 86400000), "yyyy"));
-    const [startMonth, setStartMonth] = useState(format(new Date(Date.now() - 86400000), "MM"));
-    const [startDay, setStartDay] = useState(format(new Date(Date.now() - 86400000), "dd"));
-    const [startHour, setStartHour] = useState("00");
-    const [startMin, setStartMin] = useState("00");
+    const [level, setLevel] = useState<HistLevel>('PS');
+    const [ctxPs, setCtxPs] = useState('PS1');
+    const [ctxInv, setCtxInv] = useState(1);
+    const [ctxScb, setCtxScb] = useState(1);
+    const [selected, setSelected] = useState<number[]>([1]); // elementos del nivel final
+    const [frozen, setFrozen] = useState<UISeries[]>([]);     // series fijadas de otros contextos
 
-    const [endYear, setEndYear] = useState(format(new Date(), "yyyy"));
-    const [endMonth, setEndMonth] = useState(format(new Date(), "MM"));
-    const [endDay, setEndDay] = useState(format(new Date(), "dd"));
-    const [endHour, setEndHour] = useState("23");
-    const [endMin, setEndMin] = useState("59");
+    const [variable, setVariable] = useState<HistVariable>('corriente');
+    const [preset, setPreset] = useState('today');
+    const [customStart, setCustomStart] = useState('');
+    const [customEnd, setCustomEnd] = useState('');
+    const [showIrr, setShowIrr] = useState(false);
+    const [tab, setTab] = useState<'GRAFICO' | 'DATOS'>('GRAFICO');
 
-    const [periodTrigger, setPeriodTrigger] = useState(0);
-
-    // 2. STATE: Añadir Parámetros (Cascading)
-    const [selPlanta, setSelPlanta] = useState(STATIONS[0].id);
-    const [selType, setSelType] = useState(ELEMENT_TYPES[0]);
-    const [selElements, setSelElements] = useState<string[]>([]);
-    const [selVariables, setSelVariables] = useState<string[]>([]);
-    const [searchTerm, setSearchTerm] = useState('');
-
-    // 3. STATE: Parámetros Activos (Tabla Inferior)
-    const [activeParams, setActiveParams] = useState<QueryParam[]>([]);
-
-    // 4. STATE: Data Engine & UI Errors
-    const [rawData, setRawData] = useState<HistoryPoint[]>([]);
+    const [chartData, setChartData] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
-    const [uiError, setUiError] = useState<string | null>(null);
+    const [hasData, setHasData] = useState(false);
 
-    // 5. STATE: UI Views
-    const [activeTab, setActiveTab] = useState<'DATOS' | 'GRAFICO'>('DATOS');
-    const [itemsPerPage, setItemsPerPage] = useState('50');
+    const varInfo = VARIABLES.find(v => v.key === variable)!;
+    const decimals = varInfo.unit === 'A' || varInfo.unit === 'kW' ? 2 : 1;
 
-    const [selScb, setSelScb] = useState('1');
+    // Opciones del multi-select del nivel final
+    const finalOptions = useMemo(() => {
+        if (level === 'PS') return PS_LIST.map((_, i) => i + 1);          // 1..14
+        if (level === 'INV') return [1, 2];
+        return Array.from({ length: 18 }, (_, i) => i + 1);              // SCB / String 1..18
+    }, [level]);
 
-    // --- CASCADING LOGIC ---
-    const availableElements = useMemo(() => {
-        if (selType === 'Inversores') return [{ id: 'Todos', label: 'Todos' }, { id: '1', label: '01' }, { id: '2', label: '02' }];
-        if (selType === 'Cajas (SCB)') return [{ id: 'Todas', label: 'Todas las SCB' }, ...Array.from({ length: 18 }, (_, i) => ({ id: String(i + 1), label: `SCB ${String(i + 1)}` }))];
-        if (selType === 'Strings') return [{ id: 'Todos', label: `Todos los Strings (SCB ${selScb})` }, ...Array.from({ length: 18 }, (_, i) => {
-            const num = i + 1;
-            const scbNum = Number(selScb);
-            const inv = scbNum <= 9 ? 1 : 2; // SCBs 1-9 = Inv 1, 10-18 = Inv 2
-            return { id: String(num).padStart(2, '0'), label: `String ${String(num).padStart(2, '0')} (SCB ${selScb}, Inv ${inv})` };
-        })];
-        return [];
-    }, [selType, selScb]);
+    const optLabel = (n: number) => level === 'PS' ? `PS${n}` : level === 'INV' ? `Inv ${n}` : level === 'SCB' ? `SCB ${n}` : `S${n}`;
 
+    // Series "vivas" derivadas de la selección actual
+    const liveSeries: UISeries[] = useMemo(() => selected.map(n => {
+        if (level === 'PS') return mkSeries({ level: 'PS', ps: `PS${n}`, inversor: 1, scb: 1, stringId: 1 });
+        if (level === 'INV') return mkSeries({ level: 'INV', ps: ctxPs, inversor: n, scb: 1, stringId: 1 });
+        if (level === 'SCB') return mkSeries({ level: 'SCB', ps: ctxPs, inversor: ctxInv, scb: n, stringId: 1 });
+        return mkSeries({ level: 'STRING', ps: ctxPs, inversor: ctxInv, scb: ctxScb, stringId: n });
+    }), [level, ctxPs, ctxInv, ctxScb, selected]);
+
+    const allSeries: UISeries[] = useMemo(() => {
+        const m = new Map<string, UISeries>();
+        [...frozen, ...liveSeries].forEach(s => m.set(s.id, s));
+        return Array.from(m.values());
+    }, [frozen, liveSeries]);
+
+    const seriesKey = allSeries.map(s => s.id).join(',');
+    const manySeries = allSeries.length > 8;
+
+    const toggleSel = (n: number) => setSelected(prev => prev.includes(n) ? prev.filter(x => x !== n) : [...prev, n].sort((a, b) => a - b));
+    const selectAll = () => setSelected(finalOptions);
+    const clearSel = () => setSelected([]);
+    const freezeContext = () => { setFrozen(prev => { const m = new Map(prev.map(s => [s.id, s])); liveSeries.forEach(s => m.set(s.id, s)); return Array.from(m.values()); }); setSelected([]); };
+    const resetAll = () => { setFrozen([]); setSelected([1]); };
+    const removeFrozen = (id: string) => setFrozen(prev => prev.filter(s => s.id !== id));
+
+    // Al cambiar de nivel, reiniciamos la selección
+    useEffect(() => { setSelected([1]); }, [level]);
+
+    // Búsqueda automática
     useEffect(() => {
-        setSelElements([]);
-        setSelVariables([]);
-    }, [selType]);
+        const range = presetRange(preset, customStart, customEnd);
+        const hours = Math.max(1, Math.ceil((Date.now() - range.start.getTime()) / 3600000) + 1);
+        const specs = allSeries.map(s => ({ id: s.id, level: s.level, ps: s.ps, inversor: s.inversor, scb: s.scb, stringId: s.stringId }));
+        if (specs.length === 0) { setChartData([]); setHasData(false); return; }
 
-    const filteredVariables = useMemo(() => {
-        return VARIABLES.filter(v => v.label.toLowerCase().includes(searchTerm.toLowerCase()));
-    }, [searchTerm]);
-
-    // --- ACTIONS: Añadir Parámetros ---
-    const handleAddParam = () => {
-        setUiError(null);
-        if (selPlanta === 'ALL' || selVariables.length === 0 || selElements.length === 0) {
-            setUiError("Selecciona una Power Station, al menos un Elemento y una Variable.");
-            setTimeout(() => setUiError(null), 3000);
-            return;
-        }
-
-        const newParams: QueryParam[] = [];
-        selVariables.forEach(varKey => {
-            const varObj = VARIABLES.find(v => v.key === varKey);
-            if (!varObj) return;
-
-            const elementsToAdd = (selElements.includes('Todos') || selElements.includes('Todas'))
-                ? availableElements.filter(e => e.id !== 'Todos' && e.id !== 'Todas')
-                : availableElements.filter(e => selElements.includes(e.id));
-
-            elementsToAdd.forEach(elObj => {
-                const id = `${selPlanta}-${selType}-${selType === 'Strings' ? selScb : 'N'}-${elObj.id}-${varKey}-${Date.now()}`;
-                const rawKey = selType === 'Strings'
-                    ? `${selPlanta}_STR_S${selScb}_E${elObj.id}_${varKey}`
-                    : `${selPlanta}_T${selType.charAt(0)}_E${elObj.id}_${varKey}`;
-
-                newParams.push({
-                    id,
-                    gateway: selPlanta,
-                    elementType: selType,
-                    elementId: elObj.id,
-                    scbId: selType === 'Strings' ? selScb : undefined,
-                    variableName: varObj.label,
-                    variableKey: varKey,
-                    rawKey,
-                    labelInfo: elObj.label
+        const t = setTimeout(async () => {
+            setLoading(true);
+            try {
+                const res = await fetch('/api/history/series', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hours, variable, series: specs }),
                 });
-            });
-        });
-
-        setActiveParams(prev => {
-            const next = [...prev];
-            newParams.forEach(np => {
-                if (!next.some(p => p.rawKey === np.rawKey)) next.push(np);
-            });
-            return next;
-        });
-
-        setSelVariables([]);
-        setSelElements([]);
-    };
-
-    const removeParam = (id: string) => {
-        setActiveParams(prev => prev.filter(p => p.id !== id));
-    };
-
-    // --- ACTIONS: Engine Fetcher ---
-    const executeSearch = async () => {
-        setUiError(null);
-        if (activeParams.length === 0) {
-            setUiError("Añade al menos un parámetro primero.");
-            setTimeout(() => setUiError(null), 3000);
-            return;
-        }
-
-        setLoading(true);
-
-        const uniqueGateways = Array.from(new Set(activeParams.map(p => p.gateway)));
-
-        // Construct TS robustly without UTC offset glitches
-        const startTs = new Date(Number(startYear), Number(startMonth) - 1, Number(startDay), Number(startHour), Number(startMin), 0);
-        const endTs = new Date(Number(endYear), Number(endMonth) - 1, Number(endDay), Number(endHour), Number(endMin), 59);
-
-        const hours = (differenceInHours(new Date(), startTs) > 0) ? differenceInHours(new Date(), startTs) + 1 : 24;
-
-        try {
-            const promises = uniqueGateways.map(async (g) => {
-                // Si la cantidad de horas es demasiado grande, el driver limitará la busqueda
-                const res = await fetch(`/api/scada/history?gateway=${g}&mid=ALL&hours=${hours}`);
-                if (!res.ok) return [];
                 const json = await res.json();
-                return json.data || [];
+                const resp: { id: string; points: { ts: string; value: number }[] }[] = json.series || [];
+                const map = new Map<string, any>();
+                resp.forEach(r => r.points.forEach(p => {
+                    const tms = new Date(p.ts).getTime();
+                    if (tms < range.start.getTime() || tms > range.end.getTime()) return;
+                    if (!map.has(p.ts)) map.set(p.ts, { ts: p.ts });
+                    map.get(p.ts)[r.id] = p.value;
+                }));
+                if (showIrr) {
+                    const psUnique = Array.from(new Set(allSeries.map(s => s.ps)));
+                    const irrSpecs = psUnique.map(ps => ({ id: `irr_${ps}`, level: 'PS', ps }));
+                    const res2 = await fetch('/api/history/series', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ hours, variable: 'irradiancia', series: irrSpecs }),
+                    });
+                    const json2 = await res2.json();
+                    const irrByTs = new Map<string, { sum: number; n: number }>();
+                    (json2.series || []).forEach((r: any) => r.points.forEach((p: any) => {
+                        const e = irrByTs.get(p.ts) || { sum: 0, n: 0 }; e.sum += p.value; e.n += 1; irrByTs.set(p.ts, e);
+                    }));
+                    map.forEach((row, ts) => { const e = irrByTs.get(ts); if (e && e.n) row.__irr__ = e.sum / e.n; });
+                }
+                const merged = Array.from(map.values()).sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+                setChartData(merged); setHasData(merged.length > 0);
+            } catch { setChartData([]); setHasData(false); } finally { setLoading(false); }
+        }, 300);
+        return () => clearTimeout(t);
+    }, [seriesKey, variable, preset, customStart, customEnd, showIrr]);
+
+    // --- INTELIGENCIA (Fase 3): pico/promedio/mínimo + correlación con el sol ---
+    const insights = useMemo(() => {
+        if (!chartData.length) return [];
+        return allSeries.map(s => {
+            const pts = chartData.filter(r => r[s.id] != null);
+            if (!pts.length) return null;
+            let max = -Infinity, maxTs = '', min = Infinity, sum = 0;
+            const xs: number[] = [], ys: number[] = [];
+            pts.forEach(r => {
+                const v = r[s.id];
+                if (v > max) { max = v; maxTs = r.ts; }
+                if (v < min) min = v;
+                sum += v;
+                if (showIrr && r.__irr__ != null) { xs.push(v); ys.push(r.__irr__); }
             });
+            const corr = showIrr ? pearson(xs, ys) : NaN;
+            return { id: s.id, label: labelOf(s), max, maxTs, min, avg: sum / pts.length, corr };
+        }).filter(Boolean) as { id: string; label: string; max: number; maxTs: string; min: number; avg: number; corr: number }[];
+    }, [chartData, seriesKey, showIrr]);
 
-            const resultsMatrix = await Promise.all(promises);
-            const flatData = resultsMatrix.flat();
+    const fmtVal = (v: number) => (v == null ? '-' : v.toFixed(decimals));
 
-            const filteredData = flatData
-                .filter(d => {
-                    const ts = new Date(d.ts).getTime();
-                    return ts >= startTs.getTime() && ts <= endTs.getTime();
-                })
-                .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
-
-            setRawData(filteredData);
-            setPeriodTrigger(prev => prev + 1);
-            if (activeTab !== 'GRAFICO') setActiveTab('DATOS');
-
-        } catch (err: any) {
-            setUiError("Fallo de red.");
-            setTimeout(() => setUiError(null), 3000);
-        } finally {
-            setLoading(false);
-        }
+    const exportCsv = () => {
+        if (!chartData.length) return;
+        const header = ['Tiempo', ...allSeries.map(labelOf), ...(showIrr ? ['Irradiancia (W/m2)'] : [])];
+        const lines = [header.join(',')];
+        chartData.forEach(row => {
+            lines.push([
+                format(new Date(row.ts), 'yyyy-MM-dd HH:mm'),
+                ...allSeries.map(s => (row[s.id] != null ? row[s.id].toFixed(decimals) : '')),
+                ...(showIrr ? [row.__irr__ != null ? row.__irr__.toFixed(0) : ''] : []),
+            ].join(','));
+        });
+        saveAs(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }), `historial_${variable}_${format(new Date(), 'yyyyMMdd_HHmm')}.csv`);
     };
 
-    // --- DATA PIVOTING: Time Series Grid ---
-    const timeGridData = useMemo(() => {
-        if (rawData.length === 0 || activeParams.length === 0) return [];
+    // Resumen en lenguaje natural (cuando hay una sola serie)
+    const nlSummary = useMemo(() => {
+        if (insights.length !== 1) return null;
+        const it = insights[0];
+        let s = `${it.label}: pico de ${it.max.toFixed(decimals)} ${varInfo.unit} a las ${it.maxTs ? format(new Date(it.maxTs), 'HH:mm') : '--'}, promedio ${it.avg.toFixed(decimals)} ${varInfo.unit}.`;
+        if (showIrr && !isNaN(it.corr)) {
+            const pct = Math.round(it.corr * 100);
+            s += pct >= 90 ? ` Sigue muy bien al sol (correlación ${pct}%).`
+                : pct >= 70 ? ` Sigue al sol de forma aceptable (${pct}%).`
+                : ` Correlación baja con el sol (${pct}%) — posible bajo rendimiento.`;
+        }
+        return s;
+    }, [insights, showIrr, variable]);
 
-        const timeMap = new Map<string, any>();
-
-        rawData.forEach(row => {
-            const tsStr = row.ts;
-            if (!timeMap.has(tsStr)) {
-                timeMap.set(tsStr, { ts: tsStr });
-            }
-            const timeObj = timeMap.get(tsStr);
-
-            activeParams.forEach(p => {
-                if (row.gateway === p.gateway) {
-                    let val: number | undefined = undefined;
-
-                    if (p.elementType === 'Inversores' && row.inversor === Number(p.elementId)) {
-                        val = row[p.variableKey];
-                    }
-                    else if (p.elementType === 'Cajas (SCB)' && row.scb === Number(p.elementId)) {
-                        val = row[p.variableKey];
-                    }
-                    else if (p.elementType === 'Strings') {
-                        if (row.scb === Number(p.scbId)) {
-                            const stringIndex = parseInt(p.elementId, 10) - 1;
-                            const stringRaw = Array.isArray(row.currents) ? row.currents[stringIndex] : undefined;
-
-                            if (stringRaw !== undefined) {
-                                if (p.variableKey === 'i_total_avg') val = stringRaw;
-                                if (p.variableKey === 'power_kw_avg') val = (stringRaw * row.v_avg) / 1000;
-                                if (p.variableKey === 'v_avg') val = row.v_avg;
-                                if (p.variableKey === 'temp_avg') val = row.temp_avg;
-                            } else {
-                                if (row.scb === 1) val = (row[p.variableKey] || 0) / 18;
-                            }
-                        }
-                    }
-
-                    if (val !== undefined) {
-                        timeObj[p.rawKey] = val;
-                    }
-                }
-            });
-        });
-
-        return Array.from(timeMap.values()).sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
-    }, [rawData, activeParams]);
-
-
-    // --- MAIN LAYOUT RENDER ---
     return (
-        <div className="flex h-[calc(100vh-64px)] w-full overflow-hidden bg-slate-950 text-slate-300 font-sans text-xs">
+        <div className="min-h-screen bg-slate-950 text-slate-100 p-4 sm:p-6">
+            <div className="flex flex-wrap items-center gap-3 sm:gap-4 mb-6">
+                <Link href="/">
+                    <button className="text-slate-400 hover:text-white flex items-center gap-2 text-sm border border-slate-800 rounded px-3 py-1.5 hover:bg-slate-900 transition-colors">
+                        <ArrowLeft className="h-4 w-4" /> Volver
+                    </button>
+                </Link>
+                <div>
+                    <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+                        <Activity className="h-6 w-6 text-blue-500" /> Historial Avanzado
+                    </h1>
+                    <p className="text-slate-500 text-sm">Compara y analiza por Power Station, inversor, SCB o string.</p>
+                </div>
+            </div>
 
-            {/* ====== LEFT PANEL: FILTERS (Fixed Width Sidebar) ====== */}
-            <div className="w-[305px] flex-shrink-0 flex flex-col border-r border-slate-800 bg-slate-900 overflow-y-auto">
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 space-y-4 mb-6">
+                {/* Periodo */}
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-500 font-bold w-16">Periodo</span>
+                    {PRESETS.map(p => (
+                        <button key={p.key} onClick={() => setPreset(p.key)}
+                            className={`px-3 py-1 text-xs rounded-full border transition-colors ${preset === p.key ? 'bg-blue-600 text-white border-blue-500' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}>{p.label}</button>
+                    ))}
+                    {preset === 'custom' && (
+                        <div className="flex items-center gap-2 ml-2">
+                            <input type="datetime-local" value={customStart} onChange={e => setCustomStart(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-blue-500 outline-none" />
+                            <span className="text-slate-600">→</span>
+                            <input type="datetime-local" value={customEnd} onChange={e => setCustomEnd(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-blue-500 outline-none" />
+                        </div>
+                    )}
+                </div>
 
-                {/* Error Banner */}
-                {uiError && (
-                    <div className="bg-rose-950/80 border-b border-rose-900 p-2 text-rose-400 flex items-start gap-2 text-[10px] sticky top-0 z-50">
-                        <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                        <span>{uiError}</span>
+                {/* Nivel + contexto */}
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-500 font-bold w-16">Nivel</span>
+                    {LEVELS.map(l => (
+                        <button key={l.key} onClick={() => setLevel(l.key)}
+                            className={`px-3 py-1 text-xs rounded-full border transition-colors ${level === l.key ? 'bg-emerald-600 text-white border-emerald-500' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}>{l.label}</button>
+                    ))}
+                    <div className="flex items-center gap-2 ml-2">
+                        {level !== 'PS' && (
+                            <select value={ctxPs} onChange={e => setCtxPs(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-emerald-500 outline-none cursor-pointer">
+                                {PS_LIST.map(ps => <option key={ps} value={ps}>{ps}</option>)}
+                            </select>
+                        )}
+                        {(level === 'SCB' || level === 'STRING') && (
+                            <select value={ctxInv} onChange={e => setCtxInv(Number(e.target.value))} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-emerald-500 outline-none cursor-pointer">
+                                <option value={1}>Inv 1</option><option value={2}>Inv 2</option>
+                            </select>
+                        )}
+                        {level === 'STRING' && (
+                            <select value={ctxScb} onChange={e => setCtxScb(Number(e.target.value))} className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-300 focus:border-emerald-500 outline-none cursor-pointer">
+                                {Array.from({ length: 18 }, (_, i) => i + 1).map(n => <option key={n} value={n}>SCB {n}</option>)}
+                            </select>
+                        )}
+                    </div>
+                </div>
+
+                {/* Multi-select del nivel final */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-500 font-bold w-16">Elegir</span>
+                    {finalOptions.map(n => (
+                        <button key={n} onClick={() => toggleSel(n)}
+                            className={`px-2 py-1 text-[11px] rounded border transition-colors min-w-[2rem] ${selected.includes(n) ? 'bg-emerald-700 text-white border-emerald-500' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}>{optLabel(n)}</button>
+                    ))}
+                    <button onClick={selectAll} className="px-2 py-1 text-[11px] rounded border border-slate-600 text-slate-300 hover:bg-slate-800 ml-1 inline-flex items-center gap-1"><Layers className="h-3 w-3" /> Todos</button>
+                    <button onClick={clearSel} className="px-2 py-1 text-[11px] rounded border border-slate-700 text-slate-500 hover:bg-slate-800">Ninguno</button>
+                </div>
+
+                {/* Variable + irradiancia */}
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-500 font-bold w-16">Variable</span>
+                    {VARIABLES.map(v => (
+                        <button key={v.key} onClick={() => setVariable(v.key)}
+                            className={`px-3 py-1 text-xs rounded-full border transition-colors ${variable === v.key ? 'bg-amber-600 text-white border-amber-500' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}>{v.label} <span className="opacity-60">({v.unit})</span></button>
+                    ))}
+                    <button onClick={() => setShowIrr(v => !v)}
+                        className={`inline-flex items-center gap-1 px-3 py-1 text-xs rounded-full border transition-colors ml-1 ${showIrr ? 'bg-yellow-500/20 text-yellow-400 border-yellow-600/50' : 'border-slate-700 text-slate-400 hover:bg-slate-800'}`}><Sun className="h-3.5 w-3.5" /> Irradiancia</button>
+                </div>
+
+                {/* Series fijadas + acciones */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/60">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-500 font-bold w-16">Comparar</span>
+                    {frozen.length > 0 && !manySeries && frozen.map(s => (
+                        <span key={s.id} className="inline-flex items-center gap-2 rounded-full pl-2 pr-1 py-1 text-xs border border-slate-700 bg-slate-800">
+                            {labelOf(s)}
+                            <button onClick={() => removeFrozen(s.id)} className="hover:text-rose-400 text-slate-500"><X className="h-3.5 w-3.5" /></button>
+                        </span>
+                    ))}
+                    {manySeries && <span className="text-xs text-slate-400">{allSeries.length} series</span>}
+                    <button onClick={freezeContext} disabled={liveSeries.length === 0}
+                        className="inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs border border-dashed border-slate-600 text-slate-300 hover:bg-slate-800 disabled:opacity-40 transition-colors"><Plus className="h-3.5 w-3.5" /> Fijar y comparar otro</button>
+                    {(frozen.length > 0) && <button onClick={resetAll} className="text-xs text-rose-400 hover:underline ml-1">limpiar todo</button>}
+                </div>
+            </div>
+
+            {/* Toggle + export */}
+            <div className="flex items-center justify-between mb-3">
+                <div className="text-xs text-slate-500 flex items-center gap-2">
+                    {loading && <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Cargando…</>}
+                    {!loading && hasData && `${chartData.length} puntos · ${allSeries.length} serie(s)`}
+                </div>
+                <div className="flex items-center gap-2">
+                    <button onClick={exportCsv} disabled={!hasData} className="px-3 py-1.5 text-xs rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40 flex items-center gap-1.5"><Download className="h-4 w-4" /> CSV</button>
+                    <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-1">
+                        <button onClick={() => setTab('GRAFICO')} className={`px-3 py-1 text-xs rounded flex items-center gap-1.5 ${tab === 'GRAFICO' ? 'bg-slate-800 text-amber-400' : 'text-slate-400 hover:text-white'}`}><BarChart2 className="h-4 w-4" /> Gráfico</button>
+                        <button onClick={() => setTab('DATOS')} className={`px-3 py-1 text-xs rounded flex items-center gap-1.5 ${tab === 'DATOS' ? 'bg-slate-800 text-blue-400' : 'text-slate-400 hover:text-white'}`}><List className="h-4 w-4" /> Datos</button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Resumen NL */}
+            {nlSummary && (
+                <div className="mb-3 bg-slate-900/60 border border-slate-800 rounded-lg px-4 py-2.5 text-sm text-slate-300 flex items-start gap-2">
+                    <Sparkles className="h-4 w-4 text-emerald-400 mt-0.5 shrink-0" /> {nlSummary}
+                </div>
+            )}
+
+            {/* Contenido */}
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                {!hasData && !loading ? (
+                    <div className="h-80 flex flex-col items-center justify-center text-slate-500">
+                        <Activity className="h-12 w-12 mb-3 opacity-20" />
+                        <p className="text-sm">{allSeries.length === 0 ? 'Selecciona al menos un elemento.' : 'No hay datos para este rango.'}</p>
+                    </div>
+                ) : tab === 'GRAFICO' ? (
+                    <div className="h-[26rem] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <ComposedChart data={chartData} margin={{ top: 10, right: showIrr ? 20 : 8, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                                <XAxis dataKey="ts" stroke="#475569" fontSize={11} tickFormatter={(ts) => format(new Date(ts), 'dd/MM HH:mm')} minTickGap={50} />
+                                <YAxis yAxisId="left" stroke="#475569" fontSize={11} width={48} label={{ value: varInfo.unit, angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 11 }} />
+                                {showIrr && <YAxis yAxisId="right" orientation="right" stroke="#a16207" fontSize={11} width={44} label={{ value: 'W/m²', angle: 90, position: 'insideRight', fill: '#a16207', fontSize: 11 }} />}
+                                <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: 6, fontSize: 12 }} labelFormatter={(ts) => format(new Date(ts), 'dd/MM/yyyy HH:mm')} />
+                                <Legend wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
+                                {showIrr && <Area yAxisId="right" type="monotone" dataKey="__irr__" name="Irradiancia (W/m²)" fill="#fbbf24" fillOpacity={0.15} stroke="#fbbf24" strokeOpacity={0.5} strokeWidth={1} dot={false} connectNulls />}
+                                {allSeries.map((s, idx) => (
+                                    <Line key={s.id} yAxisId="left" type="monotone" dataKey={s.id} name={labelOf(s)} stroke={colorFor(idx)} strokeWidth={manySeries ? 1.3 : 2} dot={false} connectNulls />
+                                ))}
+                            </ComposedChart>
+                        </ResponsiveContainer>
+                    </div>
+                ) : (
+                    <div className="max-h-[26rem] overflow-auto">
+                        <table className="w-full text-left text-xs whitespace-nowrap">
+                            <thead className="sticky top-0 bg-slate-900"><tr className="border-b border-slate-800">
+                                <th className="px-3 py-2 text-slate-400 font-bold">Tiempo</th>
+                                {allSeries.map((s, idx) => <th key={s.id} className="px-3 py-2 text-right font-bold" style={{ color: colorFor(idx) }}>{labelOf(s)}</th>)}
+                                {showIrr && <th className="px-3 py-2 text-right font-bold text-yellow-500">Irrad.</th>}
+                            </tr></thead>
+                            <tbody>
+                                {chartData.map((row, i) => (
+                                    <tr key={i} className="border-b border-slate-800/40 hover:bg-slate-800/40">
+                                        <td className="px-3 py-1.5 font-mono text-slate-400">{format(new Date(row.ts), 'dd/MM/yyyy HH:mm')}</td>
+                                        {allSeries.map(s => <td key={s.id} className="px-3 py-1.5 text-right font-mono text-slate-300">{row[s.id] != null ? fmtVal(row[s.id]) : <span className="text-slate-700">-</span>}</td>)}
+                                        {showIrr && <td className="px-3 py-1.5 text-right font-mono text-yellow-600/80">{row.__irr__ != null ? row.__irr__.toFixed(0) : '-'}</td>}
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </div>
                 )}
-
-                {/* --- A) BLOQUE PERIODO --- */}
-                <div className="p-4 border-b border-slate-800 bg-slate-900/50">
-                    <h3 className="font-bold text-slate-100 uppercase tracking-wider text-[11px] mb-4 flex items-center gap-2">
-                        <Calendar className="h-3.5 w-3.5 text-blue-500" /> Período Temporal
-                    </h3>
-
-                    <div className="space-y-4">
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase">Granularidad</label>
-                            <select className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-300 focus:border-blue-500 transition-colors">
-                                <option>Default (5 min)</option>
-                                <option>15 Minutos</option>
-                                <option>1 Hora</option>
-                                <option>Diario</option>
-                            </select>
-                        </div>
-
-                        {/* DESDE - Dropdowns manuales */}
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase">Límite Inicial (Desde)</label>
-                            <div className="flex gap-1 justify-between">
-                                <select value={startDay} onChange={e => setStartDay(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center flex-1 cursor-pointer hover:bg-slate-800">
-                                    {DAYS.map(d => <option key={d} value={d}>{d}</option>)}
-                                </select>
-                                <select value={startMonth} onChange={e => setStartMonth(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center flex-1 cursor-pointer hover:bg-slate-800">
-                                    {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
-                                </select>
-                                <select value={startYear} onChange={e => setStartYear(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[50px] cursor-pointer hover:bg-slate-800">
-                                    {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
-                                </select>
-                                <span className="text-slate-600 font-bold px-0.5 self-center">-</span>
-                                <select value={startHour} onChange={e => setStartHour(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[36px] cursor-pointer hover:bg-slate-800">
-                                    {HOURS.map(h => <option key={h} value={h}>{h}</option>)}
-                                </select>
-                                <span className="text-slate-600 font-bold self-center">:</span>
-                                <select value={startMin} onChange={e => setStartMin(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[36px] cursor-pointer hover:bg-slate-800">
-                                    {MINUTES.map(m => <option key={m} value={m}>{m}</option>)}
-                                </select>
-                            </div>
-                        </div>
-
-                        {/* HASTA - Dropdowns manuales */}
-                        <div className="space-y-1.5 pt-1">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase">Límite Final (Hasta)</label>
-                            <div className="flex gap-1 justify-between">
-                                <select value={endDay} onChange={e => setEndDay(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center flex-1 cursor-pointer hover:bg-slate-800">
-                                    {DAYS.map(d => <option key={d} value={d}>{d}</option>)}
-                                </select>
-                                <select value={endMonth} onChange={e => setEndMonth(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center flex-1 cursor-pointer hover:bg-slate-800">
-                                    {MONTHS.map(m => <option key={m} value={m}>{m}</option>)}
-                                </select>
-                                <select value={endYear} onChange={e => setEndYear(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[50px] cursor-pointer hover:bg-slate-800">
-                                    {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
-                                </select>
-                                <span className="text-slate-600 font-bold px-0.5 self-center">-</span>
-                                <select value={endHour} onChange={e => setEndHour(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[36px] cursor-pointer hover:bg-slate-800">
-                                    {HOURS.map(h => <option key={h} value={h}>{h}</option>)}
-                                </select>
-                                <span className="text-slate-600 font-bold self-center">:</span>
-                                <select value={endMin} onChange={e => setEndMin(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-1 outline-none text-slate-300 focus:border-blue-500 text-xs text-center w-[36px] cursor-pointer hover:bg-slate-800">
-                                    {MINUTES.map(m => <option key={m} value={m}>{m}</option>)}
-                                </select>
-                            </div>
-                        </div>
-
-                        <div className="flex items-center gap-2 pt-2">
-                            <input type="checkbox" className="h-3.5 w-3.5 rounded border-slate-700 bg-slate-950 accent-blue-600 cursor-pointer" />
-                            <span className="text-[11px] text-slate-400">Ver en paralelo</span>
-                        </div>
-
-                        <button onClick={executeSearch} disabled={loading} className="w-full bg-blue-600 hover:bg-blue-500 text-white rounded py-2 text-[11px] font-bold transition-all flex items-center justify-center gap-2 mt-2 shadow-[0_0_10px_rgba(37,99,235,0.15)]">
-                            {loading ? <span className="animate-spin">⧗</span> : "Aplicar Búsqueda"}
-                        </button>
-                    </div>
-                </div>
-
-                {/* --- B) BLOQUE AÑADIR PARÁMETROS --- */}
-                <div className="p-4 flex flex-col flex-1 min-h-0">
-                    <h3 className="font-bold text-slate-100 uppercase tracking-wider text-[11px] mb-4 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                            <Plus className="h-3.5 w-3.5 text-emerald-500" /> Añadir Parámetros
-                        </div>
-                        <span className="bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded text-[9px]">{activeParams.length} Activos</span>
-                    </h3>
-
-                    <div className="space-y-4 flex-1 flex flex-col">
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase">Power Station</label>
-                            <select value={selPlanta} onChange={e => setSelPlanta(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-300 focus:border-emerald-500 cursor-pointer hover:bg-slate-900 transition-colors">
-                                {STATIONS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-                            </select>
-                        </div>
-
-                        <div className="space-y-1.5">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase">Categoría</label>
-                            <select value={selType} onChange={e => setSelType(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-300 focus:border-emerald-500 cursor-pointer hover:bg-slate-900 transition-colors">
-                                {ELEMENT_TYPES.map(e => <option key={e} value={e}>{e}</option>)}
-                            </select>
-                        </div>
-
-                        {selType === 'Strings' && (
-                            <div className="space-y-1.5">
-                                <label className="text-[10px] text-slate-500 font-semibold uppercase">SCB Padre</label>
-                                <select value={selScb} onChange={e => setSelScb(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-300 focus:border-emerald-500 cursor-pointer hover:bg-slate-900 transition-colors">
-                                    {Array.from({ length: 18 }, (_, i) => <option key={i + 1} value={String(i + 1)}>SCB {i + 1}</option>)}
-                                </select>
-                            </div>
-                        )}
-
-                        {/* Multi-Select Físico de Elementos */}
-                        <div className="flex flex-col pt-1">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase mb-2 flex justify-between">
-                                Elementos Físicos
-                                <span className="bg-emerald-950/50 text-emerald-500 px-1.5 rounded">{selElements.length}</span>
-                            </label>
-                            <div className="flex-1 bg-slate-950 border border-slate-800 rounded overflow-y-auto max-h-[140px] custom-scrollbar shadow-inner">
-                                {availableElements.map(e => (
-                                    <label key={e.id} className="flex items-center gap-3 px-3 py-1.5 border-b border-slate-800/30 hover:bg-slate-900 cursor-pointer transition-colors group">
-                                        <input
-                                            type="checkbox"
-                                            checked={selElements.includes(e.id)}
-                                            onChange={(ev) => {
-                                                if (ev.target.checked) {
-                                                    if (e.id === 'Todos' || e.id === 'Todas') setSelElements([e.id]);
-                                                    else setSelElements(prev => [...prev.filter(x => x !== 'Todos' && x !== 'Todas'), e.id]);
-                                                } else {
-                                                    setSelElements(prev => prev.filter(k => k !== e.id));
-                                                }
-                                            }}
-                                            className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer"
-                                        />
-                                        <span className="text-[10px] text-slate-300 font-semibold group-hover:text-emerald-400 transition-colors">{e.label}</span>
-                                    </label>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Variables Selector */}
-                        <div className="flex flex-col flex-1 pt-1">
-                            <label className="text-[10px] text-slate-500 font-semibold uppercase mb-2 flex justify-between">
-                                Señales Analíticas
-                                <span className="bg-emerald-950/50 text-emerald-500 px-1.5 rounded">{selVariables.length}</span>
-                            </label>
-
-                            <div className="relative mb-2">
-                                <Search className="absolute left-2.5 top-[5px] h-3.5 w-3.5 text-slate-500" />
-                                <input
-                                    type="text"
-                                    placeholder="Buscar..."
-                                    value={searchTerm}
-                                    onChange={e => setSearchTerm(e.target.value)}
-                                    className="w-full bg-slate-950 border border-slate-700 rounded pl-8 pr-2 py-1 text-[11px] text-slate-300 outline-none focus:border-emerald-500"
-                                />
-                            </div>
-
-                            <div className="flex-1 bg-slate-950 border border-slate-800 rounded overflow-y-auto max-h-[140px] custom-scrollbar shadow-inner">
-                                {filteredVariables.map(v => (
-                                    <label key={v.key} className="flex items-center gap-3 px-3 py-1.5 border-b border-slate-800/30 hover:bg-slate-900 cursor-pointer transition-colors group">
-                                        <input
-                                            type="checkbox"
-                                            checked={selVariables.includes(v.key)}
-                                            onChange={(e) => {
-                                                if (e.target.checked) setSelVariables(prev => [...prev, v.key]);
-                                                else setSelVariables(prev => prev.filter(k => k !== v.key));
-                                            }}
-                                            className="h-3.5 w-3.5 rounded border-slate-600 bg-slate-800 accent-emerald-500 cursor-pointer"
-                                        />
-                                        <span className="text-[10px] text-slate-300 font-semibold group-hover:text-emerald-400 transition-colors">{v.label}</span>
-                                    </label>
-                                ))}
-                            </div>
-                        </div>
-
-                        <button onClick={handleAddParam} className="w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white rounded py-2 text-[11px] font-bold transition-colors mt-2 text-emerald-400 hover:text-emerald-300">
-                            Construir Tabla
-                        </button>
-                    </div>
-                </div>
             </div>
 
-            {/* ====== RIGHT PANEL: RESULTS & DATA ====== */}
-            <div className="flex-1 flex flex-col min-w-0 bg-slate-950">
-
-                {/* --- BARRA SUPERIOR (Paginación / Exportar) --- */}
-                <div className="h-12 border-b border-slate-800 bg-slate-900 flex items-center justify-between px-4 flex-shrink-0">
-
-                    {/* Controles de Vista de Tabla */}
-                    <div className="flex items-center gap-4 text-slate-400">
-                        <div className="flex items-center gap-2">
-                            <span className="hidden sm:inline">Resultados por pág.</span>
-                            <span className="sm:hidden">Filas</span>
-                            <select value={itemsPerPage} onChange={e => setItemsPerPage(e.target.value)} className="bg-slate-950 border border-slate-700 rounded px-1.5 py-1 outline-none text-slate-300 focus:border-blue-500">
-                                <option>25</option>
-                                <option>50</option>
-                                <option>100</option>
-                                <option>250</option>
-                            </select>
-                        </div>
-
-                        <div className="h-4 w-px bg-slate-700 mx-1"></div>
-
-                        <div className="flex items-center gap-2">
-                            <div className="flex items-center bg-slate-950 border border-slate-700 rounded divide-x divide-slate-700">
-                                <button className="px-1.5 py-1 hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors"><ChevronsLeft className="h-3.5 w-3.5" /></button>
-                                <button className="px-1.5 py-1 hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors"><ChevronLeft className="h-3.5 w-3.5" /></button>
-                            </div>
-                            <span className="px-2 py-0.5 font-bold text-slate-200 bg-slate-800 rounded border border-slate-700 text-[10px]">1</span>
-                            <div className="flex items-center bg-slate-950 border border-slate-700 rounded divide-x divide-slate-700">
-                                <button className="px-1.5 py-1 hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors"><ChevronRight className="h-3.5 w-3.5" /></button>
-                                <button className="px-1.5 py-1 hover:bg-slate-800 text-slate-500 hover:text-slate-300 transition-colors"><ChevronsRight className="h-3.5 w-3.5" /></button>
-                            </div>
-                        </div>
-
-                        <span className="text-[10px] hidden md:inline ml-2 border border-slate-800 bg-slate-950 px-2 py-0.5 rounded-full">
-                            Página 1 de 1
-                            <span className="text-slate-600 ml-1">({timeGridData.length} registros)</span>
-                        </span>
-                    </div>
-
-                    {/* Acciones e Iconos */}
-                    <div className="flex items-center gap-1.5 sm:gap-3 text-slate-400">
-                        <button title="Exportar CSV" className="p-1.5 hover:text-emerald-400 hover:bg-slate-800 rounded transition-all"><Download className="h-4 w-4" /></button>
-                        <button title="Guardar Preset" className="p-1.5 hover:text-blue-400 hover:bg-slate-800 rounded transition-all"><Save className="h-4 w-4" /></button>
-
-                        <div className="h-4 w-px bg-slate-700 mx-1"></div>
-
-                        <button
-                            onClick={() => setActiveTab(activeTab === 'DATOS' ? 'GRAFICO' : 'DATOS')}
-                            title={activeTab === 'DATOS' ? "Ver Gráfica" : "Ver Tabla"}
-                            className={`p-1.5 rounded transition-all flex items-center gap-1.5 border border-transparent ${activeTab === 'GRAFICO' ? 'text-amber-400 bg-amber-950/30 border-amber-900/50' : 'hover:text-amber-400 hover:bg-slate-800'}`}
-                        >
-                            {activeTab === 'DATOS' ? <LineChart className="h-4 w-4" /> : <List className="h-4 w-4" />}
-                            <span className="hidden lg:inline text-[10px] font-bold uppercase tracking-wide">
-                                {activeTab === 'DATOS' ? 'Gráfica' : 'Datos'}
-                            </span>
-                        </button>
-
-                        <div className="h-4 w-px bg-slate-700 mx-1"></div>
-
-                        <button title="Configuración" className="p-1.5 hover:text-slate-200 hover:bg-slate-800 rounded transition-all"><Settings className="h-4 w-4" /></button>
-                        <button title="Pantalla Completa" className="p-1.5 hover:text-slate-200 hover:bg-slate-800 rounded transition-all"><Maximize className="h-4 w-4" /></button>
-                    </div>
-                </div>
-
-                {/* --- CONTENIDO PRINCIPAL (Tabla o Gráfica) --- */}
-                <div className="flex-1 overflow-hidden relative">
-
-                    {/* EMPTY STATE */}
-                    {activeParams.length === 0 && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 bg-slate-950/50">
-                            <Box className="h-16 w-16 mb-4 opacity-10" />
-                            <h3 className="font-bold text-slate-400 text-base">Constructor de Consultas Vacío</h3>
-                            <p className="text-xs mt-2 max-w-sm text-center">Utiliza el panel izquierdo para seleccionar los elementos físicos y las variables que deseas analizar.</p>
-                        </div>
-                    )}
-
-                    {/* VISTA: TABLA DATOS */}
-                    {activeParams.length > 0 && activeTab === 'DATOS' && (
-                        <div className="h-full overflow-auto relative custom-scrollbar bg-slate-950">
-                            <table className="w-full text-left whitespace-nowrap border-collapse">
-                                <thead className="bg-slate-900 sticky top-0 z-10 shadow-md">
-                                    <tr>
-                                        <th className="px-4 py-3 border-b border-r border-slate-800 min-w-[160px] font-bold text-[11px] text-slate-300 bg-slate-900">
-                                            <div className="flex items-center justify-between">
-                                                Tiempo <FilterIcon />
-                                            </div>
-                                        </th>
-                                        {activeParams.map(p => (
-                                            <th key={p.id} className="px-4 py-2 border-b border-r border-slate-800 hover:bg-slate-800/80 transition-colors group min-w-[180px] bg-slate-900">
-                                                <div className="flex justify-between items-start mb-1">
-                                                    <span className="text-[9px] uppercase tracking-wider text-blue-400 font-bold bg-blue-950/30 px-1 py-0.5 rounded">
-                                                        {p.gateway}
-                                                    </span>
-                                                    <button onClick={() => removeParam(p.id)} title="Remover" className="opacity-0 group-hover:opacity-100 hover:text-rose-500 transition-opacity">
-                                                        <Trash2 className="h-3 w-3" />
-                                                    </button>
-                                                </div>
-                                                <div className="text-[11px] font-semibold text-slate-200 truncate" title={`${p.labelInfo} - ${p.variableName}`}>
-                                                    {p.labelInfo}
-                                                </div>
-                                                <div className="text-[10px] text-slate-400 flex items-center justify-between mt-0.5">
-                                                    <span className="truncate text-emerald-500">{p.variableName}</span>
-                                                    <FilterIcon className="opacity-0 group-hover:opacity-100 h-2.5 w-2.5 ml-1 flex-shrink-0" />
-                                                </div>
-                                            </th>
-                                        ))}
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {periodTrigger > 0 && timeGridData.length === 0 ? (
-                                        <tr><td colSpan={100} className="text-center py-12 text-slate-500 font-mono text-xs">Sin registros para el rango temporal.</td></tr>
-                                    ) : (
-                                        timeGridData.map((row, i) => (
-                                            <tr key={i} className="border-b border-slate-800/30 hover:bg-slate-800/50 transition-colors">
-                                                <td className="px-4 py-2 border-r border-slate-800/30 font-mono text-[11px] text-slate-400 bg-slate-900/30">
-                                                    {format(new Date(row.ts), 'dd/MM/yyyy HH:mm:ss')}
-                                                </td>
-                                                {activeParams.map(p => {
-                                                    const val = row[p.rawKey];
-                                                    return (
-                                                        <td key={p.id} className="px-4 py-2 border-r border-slate-800/30 font-mono text-[11px] text-right text-slate-300">
-                                                            {val !== undefined ? val.toFixed(4) : <span className="text-slate-700">-</span>}
-                                                        </td>
-                                                    );
-                                                })}
-                                            </tr>
-                                        ))
-                                    )}
-                                    {/* Empty filler rows if no data searched yet */}
-                                    {periodTrigger === 0 && Array.from({ length: 15 }).map((_, i) => (
-                                        <tr key={`empty-${i}`} className="border-b border-slate-800/10">
-                                            <td className="px-4 py-3 border-r border-slate-800/10 text-slate-800">--</td>
-                                            {activeParams.map(p => <td key={`e-${p.id}`} className="px-4 py-3 border-r border-slate-800/10 text-slate-800">--</td>)}
+            {/* Panel de inteligencia */}
+            {insights.length > 0 && (
+                <div className="mt-4 bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                    <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2 mb-3"><Sparkles className="h-4 w-4 text-emerald-400" /> Análisis del periodo</h3>
+                    <div className="overflow-auto max-h-72">
+                        <table className="w-full text-left text-xs">
+                            <thead className="text-slate-500 border-b border-slate-800">
+                                <tr>
+                                    <th className="px-2 py-1.5 font-bold">Serie</th>
+                                    <th className="px-2 py-1.5 text-right font-bold">Pico ({varInfo.unit})</th>
+                                    <th className="px-2 py-1.5 text-right font-bold">Hora pico</th>
+                                    <th className="px-2 py-1.5 text-right font-bold">Promedio</th>
+                                    <th className="px-2 py-1.5 text-right font-bold">Mínimo</th>
+                                    {showIrr && <th className="px-2 py-1.5 text-right font-bold">Corr. sol</th>}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {insights.map((it, idx) => {
+                                    const pct = Math.round(it.corr * 100);
+                                    const corrColor = isNaN(it.corr) ? 'text-slate-600' : pct >= 90 ? 'text-emerald-400' : pct >= 70 ? 'text-amber-400' : 'text-rose-400';
+                                    return (
+                                        <tr key={it.id} className="border-b border-slate-800/40">
+                                            <td className="px-2 py-1.5 font-medium" style={{ color: colorFor(idx) }}>{it.label}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono text-slate-200">{it.max.toFixed(decimals)}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono text-slate-400">{it.maxTs ? format(new Date(it.maxTs), 'dd/MM HH:mm') : '--'}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono text-slate-300">{it.avg.toFixed(decimals)}</td>
+                                            <td className="px-2 py-1.5 text-right font-mono text-slate-400">{it.min.toFixed(decimals)}</td>
+                                            {showIrr && <td className={`px-2 py-1.5 text-right font-mono font-bold ${corrColor}`}>{isNaN(it.corr) ? '—' : `${pct}%`}</td>}
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    )}
-
-                    {/* VISTA: GRÁFICO */}
-                    {activeParams.length > 0 && activeTab === 'GRAFICO' && (
-                        <div className="p-4 h-full bg-slate-950 flex flex-col">
-                            {periodTrigger === 0 ? (
-                                <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
-                                    <LineChart className="h-12 w-12 mb-4 opacity-20" />
-                                    <h3 className="text-sm">Aplica un rango temporal para renderizar el gráfico multiparamétrico.</h3>
-                                </div>
-                            ) : timeGridData.length === 0 ? (
-                                <div className="flex-1 flex flex-col items-center justify-center text-slate-500">
-                                    <span className="font-mono text-xs">Sin registros para graficar.</span>
-                                </div>
-                            ) : (
-                                <div className="flex-1 min-h-0 bg-slate-900 border border-slate-800 rounded p-4">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <RechartsLineChart data={timeGridData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" />
-                                            <XAxis dataKey="ts" stroke="#475569" fontSize={10} tickFormatter={(val) => format(new Date(val), 'HH:mm')} minTickGap={40} tick={{ fill: '#64748b' }} />
-                                            <YAxis stroke="#475569" fontSize={10} domain={['auto', 'auto']} tick={{ fill: '#64748b' }} width={40} />
-                                            <Tooltip
-                                                contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', borderRadius: '4px', fontSize: '11px', color: '#f8fafc' }}
-                                                labelFormatter={(ts) => format(new Date(ts), 'dd/MM/yyyy HH:mm:ss')}
-                                                itemStyle={{ padding: '2px 0' }}
-                                            />
-                                            <Legend wrapperStyle={{ paddingTop: '15px', fontSize: '11px' }} />
-                                            {activeParams.map((p, i) => (
-                                                <Line
-                                                    key={p.rawKey}
-                                                    type="monotone"
-                                                    dataKey={p.rawKey}
-                                                    name={`${p.gateway} | ${p.labelInfo} | ${p.variableKey.split('_')[0]}`}
-                                                    stroke={`hsl(${(i * 137.5) % 360}, 80%, 65%)`}
-                                                    strokeWidth={2}
-                                                    dot={false}
-                                                    activeDot={{ r: 4, strokeWidth: 0 }}
-                                                />
-                                            ))}
-                                        </RechartsLineChart>
-                                    </ResponsiveContainer>
-                                </div>
-                            )}
-                        </div>
-                    )}
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                    {showIrr && <p className="text-[11px] text-slate-500 mt-2">Correlación con el sol: ≥90% buen seguimiento · 70–90% aceptable · &lt;70% posible bajo rendimiento (revisar suciedad/sombra/fallo).</p>}
                 </div>
-
-            </div>
-
-            {/* Custom scrollbar styles global o local en Next.js */}
-            <style jsx global>{`
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 6px;
-                    height: 6px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: rgba(15, 23, 42, 1);
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background: rgba(51, 65, 85, 1);
-                    border-radius: 4px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-                    background: rgba(71, 85, 105, 1);
-                }
-            `}</style>
+            )}
         </div>
-    );
-}
-
-// Helper icon
-function FilterIcon({ className = "" }: { className?: string }) {
-    return (
-        <svg className={`h-3 w-3 inline cursor-pointer text-slate-500 hover:text-blue-400 transition-colors ${className}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-        </svg>
     );
 }

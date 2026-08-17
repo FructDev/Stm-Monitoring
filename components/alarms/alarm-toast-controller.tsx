@@ -28,8 +28,9 @@ export function AlarmToastController() {
             if (!dataRef.current || isMutedRef.current) return;
 
             const currentAlarms = dataRef.current.alarms;
-            // Filter for Critical/Severe alarms (Severity >= 3)
-            const currentCriticals = currentAlarms.filter(a => a.severity >= 3);
+            // Alarmas críticas (severidad >= 3) que NO han sido reconocidas ("Reconocer").
+            // Las reconocidas quedan silenciadas 8h y no vuelven a generar toast.
+            const currentCriticals = currentAlarms.filter(a => a.severity >= 3 && a.ack !== 1);
 
             const lastShown = lastShownRef.current;
             const now = Date.now();

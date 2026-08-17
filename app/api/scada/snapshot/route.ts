@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import { driverUrl } from "@/app/lib/driver-url";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
     try {
         // Proxy to local SCADA backend
-        const res = await fetch("http://127.0.0.1:3030/snapshot", {
+        const res = await fetch(driverUrl("/snapshot"), {
             cache: "no-store",
             next: { revalidate: 0 },
         });

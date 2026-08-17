@@ -16,7 +16,9 @@ export async function GET() {
         `).all() as any[];
 
         const now = new Date().getTime();
-        const UMBRAL_SEGUNDOS = 900; // 15 Minutos en segundos
+        // Tolerancia alta: el deadband del driver hace que una SCB estable conserve un ts viejo aunque
+        // comunique. Evita falsas alarmas críticas de "sin comunicación". La caída real la marca el driver.
+        const UMBRAL_SEGUNDOS = 90000;
 
         // Construir mapa de lecturas con mapeo lógico de SCBs
         const lookup = new Map();
@@ -176,6 +178,23 @@ export async function GET() {
                     });
                 }
             }
+        });
+
+        // 1.5 Marcar alarmas reconocidas ("Reconocer"): silencio de 8 horas por
+        // combinación exacta (planta, inversor, scb, alarm_code). Si la caja cambia de
+        // problema, el alarm_code cambia y la alarma vuelve a contar como no reconocida.
+        const ACK_WINDOW_MS = 8 * 60 * 60 * 1000;
+        const ackRows = stateDb.prepare(
+            "SELECT power_station, inversor, scb, alarm_code, ack_ts FROM alarm_acks"
+        ).all() as any[];
+        const ackSet = new Set<string>();
+        ackRows.forEach((r) => {
+            if (now - new Date(r.ack_ts).getTime() < ACK_WINDOW_MS) {
+                ackSet.add(`${r.power_station}-${r.inversor}-${r.scb}-${r.alarm_code}`);
+            }
+        });
+        alarms.forEach((a) => {
+            a.ack = ackSet.has(`${a.power_station}-${a.inversor}-${a.scb}-${a.alarm_code}`) ? 1 : 0;
         });
 
         // 2. Aggregate counts

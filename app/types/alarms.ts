@@ -10,6 +10,11 @@ export interface ActiveAlarm {
     last_seen_ts: string;
     message: string;
     ack: number;
+
+    // Campos opcionales que emite el sintetizador de alarmas en /api/alarms/active
+    details?: string;
+    start_ts?: string;
+    acknowledged?: number;
 }
 
 export interface AlarmEvent {

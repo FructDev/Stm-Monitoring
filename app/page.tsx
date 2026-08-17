@@ -14,6 +14,7 @@ import { ParkStats, PsSummary } from "./types";
 import { ReportModal } from "./components/ReportModal";
 import { AlarmBanner } from "@/components/alarms/alarm-banner";
 import { AlarmToastController } from "@/components/alarms/alarm-toast-controller";
+import { PredictiveAlerts } from "./components/dashboard/PredictiveAlerts";
 
 // 1. IMPORTAMOS EL HOOK DE ALERTAS
 // import { useScadaAlerts } from "@/hooks/useScadaAlerts";
@@ -56,16 +57,19 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-slate-950 pb-20">
       <Header lastUpdate={data?.last_update} />
 
-      <main className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-4 py-6 sm:py-8">
         <AlarmBanner />
 
         {/* KPI CARDS */}
         {data && <StatsOverview stats={data} />}
 
+        {/* PREDICCIONES IA */}
+        <PredictiveAlerts />
+
         {/* BARRA DE HERRAMIENTAS DEL GRID */}
         <div className="mt-8 mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <h2 className="text-2xl font-bold tracking-tight text-white">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
               Estado del Parque
             </h2>
 

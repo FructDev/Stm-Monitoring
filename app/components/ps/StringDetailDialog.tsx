@@ -4,6 +4,7 @@ import { Thermometer, Zap, Activity } from "lucide-react";
 import { getScbCapacity } from "@/app/lib/scb-config";
 import { HistoricalChart } from "./HistoricalChart";
 import { useState } from "react";
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from "@/components/ui/button";
 import { LineChart as LineChartIcon } from "lucide-react";
 import { analyzeScb } from "@/app/lib/analytics";
@@ -18,6 +19,18 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
     const [showChart, setShowChart] = useState(false);
     const [activeString, setActiveString] = useState<number | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const queryClient = useQueryClient();
+
+    // Fetch AI Predictions to overlay on the strings
+    const { data: predictions } = useQuery<any[]>({
+        queryKey: ['ai-predictions'],
+        queryFn: async () => {
+            const res = await fetch('/api/stats/predictions');
+            if (!res.ok) return [];
+            return res.json();
+        },
+        enabled: isOpen // Only fetch when dialog is open
+    });
 
     if (!scb) return null;
 
@@ -32,7 +45,7 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
 
     const assumedGood = analysis.assumedGoodStrings || [];
     const suspectedCards = analysis.suspectedDeadCards || [];
-    const expiredCards = analysis.expiredReviewCards || [];
+    const confirmedCards = analysis.confirmedDeadCards || [];
 
     const strings = Array.from({ length: 18 }, (_, i) => {
         const id = i + 1;
@@ -43,7 +56,7 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
         return { id, val, isValid };
     });
 
-    const registrarRevision = async (cardId: number) => {
+    const actualizarTarjeta = async (cardId: number, normalize = false) => {
         setIsSubmitting(true);
         try {
             // Mapeo inversores si es PS antigua
@@ -55,7 +68,7 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
             }
 
             await fetch('/api/reviews', {
-                method: 'POST',
+                method: normalize ? 'DELETE' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     power_station: scb.power_station,
@@ -64,9 +77,19 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                     card_id: cardId
                 })
             });
-            window.location.reload();
+
+            // Refrescamos los datos afectados por la revisión sin recargar toda la página
+            // (evita parpadeo y pérdida de estado). Cerramos el modal al terminar.
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: ['ps-data'] }),
+                queryClient.invalidateQueries({ queryKey: ['park-stats'] }),
+                queryClient.invalidateQueries({ queryKey: ['activeAlarms'] }),
+                queryClient.invalidateQueries({ queryKey: ['ai-predictions'] }),
+            ]);
+            onClose();
         } catch (e) {
             console.error(e);
+        } finally {
             setIsSubmitting(false);
         }
     }
@@ -74,14 +97,18 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
     function getStringColor(val: number, avg: number, id: number) {
         if (assumedGood.includes(id)) return 'bg-purple-950/40 border-purple-900 text-purple-400';
         if (val === 0) {
-            // Check if it belongs to an expired card
-            const cardId = Math.floor((id - 1) / 4) + 1;
-            if (expiredCards.includes(cardId)) return 'bg-rose-950/40 border-rose-900 text-rose-500 animate-pulse';
             return 'bg-rose-950/40 border-rose-900 text-rose-500';
         }
         if (avg > 1 && val < avg * 0.7) return 'bg-orange-950/40 border-orange-900 text-orange-400'; // Sucio/Sombra
         return 'bg-emerald-950/30 border-emerald-900/50 text-emerald-400'; // OK
     }
+
+    // Filter predictions for this specific SCB
+    const scbPredictions = predictions?.filter(p => 
+        p.power_station === scb.power_station && 
+        p.inversor === scb.inversor && 
+        p.scb === scb.scb
+    ) || [];
 
     return (
         <Dialog open={isOpen} onOpenChange={onClose}>
@@ -89,7 +116,7 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                 <DialogHeader>
                     <DialogTitle className="flex items-center gap-3 text-2xl">
                         <span className="font-mono text-emerald-400">
-                            SCB {scb.scb}
+                            {scb.power_station} · SCB {scb.scb}
                         </span>
                         <span className="text-slate-500 text-base font-normal">
                             | Inversor {Number(scb.scb) > 18 ? 2 : scb.inversor}
@@ -114,13 +141,13 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                                 <div>
                                     <h5 className="text-purple-400 font-bold text-sm mb-0.5">⚠️ Fallo de Telemetría STM-SP</h5>
                                     <p className="text-xs text-slate-300">
-                                        Pérdida en tarjeta(s) {suspectedCards.join(', ')}. Se asumen buenos temporalmente.
+                                        Canales sin medición en tarjeta(s) {suspectedCards.join(', ')}. Confirma solo si verificaste que los strings producen.
                                     </p>
                                 </div>
                                 <div className="flex flex-wrap gap-1.5 justify-end max-w-[200px]">
-                                    {suspectedCards.map(c => (
-                                        <Button key={c} size="sm" variant="outline" disabled={isSubmitting} className="border-purple-800 text-purple-300 hover:bg-purple-900 text-xs py-0.5 h-7 px-2" onClick={() => registrarRevision(c)}>
-                                            Revisar T{c}
+                                    {suspectedCards.filter(c => !confirmedCards.includes(c)).map(c => (
+                                        <Button key={c} size="sm" variant="outline" disabled={isSubmitting} className="border-purple-800 text-purple-300 hover:bg-purple-900 text-xs py-0.5 h-7 px-2" onClick={() => actualizarTarjeta(c)}>
+                                            Confirmar T{c}
                                         </Button>
                                     ))}
                                 </div>
@@ -128,19 +155,19 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                         </div>
                     )}
 
-                    {expiredCards.length > 0 && (
-                        <div className="bg-rose-950/30 border border-rose-900/50 p-2.5 rounded mb-4">
+                    {confirmedCards.length > 0 && (
+                        <div className="bg-indigo-950/30 border border-indigo-900/50 p-2.5 rounded mb-4">
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <h5 className="text-rose-500 font-bold text-sm mb-0.5">❌ Revisión Caducada</h5>
+                                    <h5 className="text-indigo-300 font-bold text-sm mb-0.5">Tarjeta de medición confirmada</h5>
                                     <p className="text-xs text-slate-300">
-                                        Inspección de tarjeta(s) {expiredCards.join(', ')} vencida (&gt;7 días).
+                                        Tarjeta(s) {confirmedCards.join(', ')}: sus canales se reconstruyen y no cuentan como strings caídos.
                                     </p>
                                 </div>
                                 <div className="flex flex-wrap gap-1.5 justify-end max-w-[200px]">
-                                    {expiredCards.map(c => (
-                                        <Button key={c} size="sm" variant="destructive" disabled={isSubmitting} className="text-xs py-0.5 h-7 px-2" onClick={() => registrarRevision(c)}>
-                                            Renovar T{c}
+                                    {confirmedCards.map(c => (
+                                        <Button key={c} size="sm" variant="outline" disabled={isSubmitting} className="border-indigo-700 text-indigo-200 text-xs py-0.5 h-7 px-2" onClick={() => actualizarTarjeta(c, true)}>
+                                            Normalizar T{c}
                                         </Button>
                                     ))}
                                 </div>
@@ -168,6 +195,9 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
 
                                     const ringStyle = isSelected ? 'ring-2 ring-blue-500 scale-105 shadow-lg z-10' : 'hover:scale-105 transition-transform cursor-pointer';
 
+                                    const stringPrediction = scbPredictions.find(p => p.string_id === s.id);
+                                    const hasAiWarning = !!stringPrediction;
+
                                     return (
                                         <div
                                             key={s.id}
@@ -177,8 +207,11 @@ export function StringDetailDialog({ scb, isOpen, onClose }: Props) {
                                                     setShowChart(true);
                                                 }
                                             }}
-                                            className={`p-2 rounded border flex flex-col items-center justify-center transition-all ${baseStyle} ${s.isValid ? ringStyle : ''}`}
+                                            className={`p-2 rounded border flex flex-col items-center justify-center transition-all relative ${baseStyle} ${s.isValid ? ringStyle : ''}`}
                                         >
+                                            {hasAiWarning && (
+                                                <span className="absolute -top-2 -right-2 w-4 h-4 bg-indigo-500 rounded-full animate-bounce" title={stringPrediction.details}></span>
+                                            )}
                                             <span className={`text-xs opacity-70 mb-1 ${isSelected ? 'text-blue-300 font-bold' : ''}`}>S{s.id}</span>
                                             <span className="font-mono font-bold text-lg">
                                                 {!s.isValid ? '--' : s.val.toFixed(1)}

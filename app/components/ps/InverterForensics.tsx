@@ -1,6 +1,6 @@
 import { ScbData } from "@/app/types";
 import { analyzeScb } from "@/app/lib/analytics";
-import { AlertOctagon, TrendingDown, ZapOff, Moon, WifiOff, Activity } from "lucide-react";
+import { AlertOctagon, TrendingDown, ZapOff, Moon, WifiOff, Activity, Zap } from "lucide-react";
 
 export function InverterForensics({ scbs, title }: { scbs: ScbData[], title: string }) {
     if (!scbs || scbs.length === 0) return null;
@@ -16,7 +16,7 @@ export function InverterForensics({ scbs, title }: { scbs: ScbData[], title: str
     const totalActual = analysis.reduce((acc, curr) => acc + curr.actualPowerKW, 0);
 
     // 🔥 NUEVO: Calculamos la corriente total bruta para desempatar (Divided by 100)
-    const totalRawAmps = scbs.reduce((acc, curr) => acc + ((curr.i_total ?? 0) / 100), 0);
+    const totalRawAmps = analysis.reduce((acc, curr) => acc + curr.effectiveCurrentAmps, 0);
 
     // --- LÓGICA DE ESTADO SUPERIOR ---
 
@@ -114,7 +114,17 @@ export function InverterForensics({ scbs, title }: { scbs: ScbData[], title: str
                 <div className="hidden md:block w-px h-12 bg-slate-800"></div>
 
                 {/* Métricas */}
-                <div className={`grid grid-cols-3 gap-8 text-center md:text-left ${statusMode === 'OFFLINE' ? 'opacity-30 grayscale' : ''}`}>
+                <div className={`grid grid-cols-2 md:grid-cols-4 gap-6 text-center md:text-left ${statusMode === 'OFFLINE' ? 'opacity-30 grayscale' : ''}`}>
+
+                    <div>
+                        <div className="flex items-center gap-2 justify-center md:justify-start text-slate-400 text-[10px] uppercase font-bold mb-1">
+                            <Zap className="h-3 w-3 text-emerald-400" />
+                            Potencia Actual
+                        </div>
+                        <div className="text-2xl font-mono font-bold text-emerald-400">
+                            {(totalActual / 1000).toFixed(2)} <span className="text-xs text-slate-500 font-normal">MW</span>
+                        </div>
+                    </div>
 
                     <div>
                         <div className="flex items-center gap-2 justify-center md:justify-start text-slate-400 text-[10px] uppercase font-bold mb-1">

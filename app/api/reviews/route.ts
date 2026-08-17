@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
 
         stateDb.prepare(`
             INSERT INTO scb_manual_reviews (power_station, inversor, scb, card_id, last_review_ts, status)
-            VALUES (?, ?, ?, ?, ?, 'OK')
+            VALUES (?, ?, ?, ?, ?, 'CONFIRMED_CARD_FAILURE')
             ON CONFLICT(power_station, inversor, scb, card_id) DO UPDATE SET
             last_review_ts=excluded.last_review_ts,
             status=excluded.status
@@ -48,5 +48,23 @@ export async function POST(request: NextRequest) {
     } catch (error) {
         console.error("Error saving review:", error);
         return NextResponse.json({ error: "Failed to save review" }, { status: 500 });
+    }
+}
+
+export async function DELETE(request: NextRequest) {
+    try {
+        const body = await request.json();
+        const { power_station, inversor, scb, card_id } = body;
+        if (!power_station || !inversor || !scb || !card_id) {
+            return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+        }
+        const result = stateDb.prepare(`
+            DELETE FROM scb_manual_reviews
+            WHERE power_station = ? AND inversor = ? AND scb = ? AND card_id = ?
+        `).run(power_station, inversor, scb, card_id);
+        return NextResponse.json({ success: true, removed: result.changes > 0 });
+    } catch (error) {
+        console.error("Error normalizing card:", error);
+        return NextResponse.json({ error: "Failed to normalize card" }, { status: 500 });
     }
 }

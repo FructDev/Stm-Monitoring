@@ -2,11 +2,14 @@
 // app/api/heatmap/route.ts
 import { NextResponse } from "next/server";
 import db from "@/app/lib/db";
+import stateDb from "@/app/lib/stateDb";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
+    // Tolerancia alta a propósito (igual que /api/stats): el deadband del driver hace que una SCB
+    // estable conserve un ts viejo aunque comunique. La caída real la marca el driver con estado.
     const UMBRAL_SEGUNDOS = 90000;
 
     // 1. CAMBIO: Usamos SELECT * para traer s01, s02... s18 y vdc
@@ -22,6 +25,14 @@ export async function GET() {
       .all() as any[];
 
     const now = new Date().getTime();
+    const confirmedCards = new Map<string, number[]>();
+    const reviewRows = stateDb.prepare("SELECT power_station, inversor, scb, card_id FROM scb_manual_reviews").all() as any[];
+    for (const r of reviewRows) {
+      const key = `${r.power_station}-${r.inversor}-${r.scb}`;
+      const cards = confirmedCards.get(key) ?? [];
+      cards.push(Number(r.card_id));
+      confirmedCards.set(key, cards);
+    }
     let globalSumAmps = 0;
     let activeCount = 0;
 
@@ -86,6 +97,7 @@ export async function GET() {
         status: cell.estado === 'FAIL' ? 'READ_FAIL' : cell.estado, // Fix: Normalize 'FAIL' to 'READ_FAIL'
         perf: performance,
         strings: stringValues, // <--- AQUÍ ESTÁ LA DATA PARA EL EXCEL
+        confirmedCards: confirmedCards.get(`${cell.power_station}-${finalInversor}-${finalScb}`) ?? [],
       };
     });
 
@@ -112,6 +124,7 @@ export async function GET() {
               status: "OFFLINE",
               perf: 0,
               strings: new Array(18).fill(0),
+              confirmedCards: [],
             });
           }
         }

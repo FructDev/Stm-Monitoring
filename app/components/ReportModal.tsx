@@ -11,6 +11,11 @@ import { saveAs } from 'file-saver';
 import * as XLSX from 'xlsx';
 import { getScbCapacity } from '@/app/lib/scb-config';
 
+const cardChannels = (cardId: number, capacity: number): number[] => {
+    const start = (cardId - 1) * 4;
+    return Array.from({ length: Math.min(4, Math.max(0, capacity - start)) }, (_, i) => start + i);
+};
+
 // Asegúrate de que este componente exista o comenta la línea si no usas PDF aún
 import { ManagementReport } from '@/app/reports/ManagementReport';
 
@@ -63,11 +68,12 @@ export function ReportModal() {
                 // SOLO si la caja tiene amperaje suficiente (> 2A) para evitar falsos positivos
                 const hasAmps = (d.amps || 0) > 2;
                 const capacity = getScbCapacity(d.ps, d.inversor, d.scb);
+                const ignored = new Set<number>((d.confirmedCards || []).flatMap((cardId: number) => cardChannels(cardId, capacity)));
 
                 const deadIndices = (d.strings && hasAmps)
                     ? d.strings
                         .slice(0, capacity) // <-- FIX: Trim empty slots for 15-string inverters
-                        .map((val: number, idx: number) => (val < 0.5 ? idx + 1 : null))
+                        .map((val: number, idx: number) => (val < 0.5 && !ignored.has(idx) ? idx + 1 : null))
                         .filter((val: number) => val !== null)
                     : [];
 
@@ -212,26 +218,14 @@ export function ReportModal() {
                     const capacity = getScbCapacity(d.ps, d.inversor, d.scb);
                     const strings = d.strings.slice(0, capacity); // <-- FIX: Only check valid strings
 
-                    // Iteramos buscando bloques de ceros consecutivos
-                    let consecutiveCount = 0;
-                    let startIdx = -1;
                     const damagedBlocks: string[] = [];
-
-                    for (let i = 0; i < strings.length; i++) {
-                        const val = strings[i];
-                        if (val < 0.5) {
-                            if (consecutiveCount === 0) startIdx = i;
-                            consecutiveCount++;
-                        } else {
-                            if (consecutiveCount >= 4) {
-                                damagedBlocks.push(`Strings ${startIdx + 1}-${startIdx + consecutiveCount}`);
-                            }
-                            consecutiveCount = 0;
+                    // Respetar los límites físicos de cada STM-SP; nunca combinar, por
+                    // ejemplo, strings 3-6 como si fueran una sola tarjeta.
+                    for (let cardId = 1; cardId <= 5; cardId++) {
+                        const indices = cardChannels(cardId, capacity);
+                        if (indices.length > 0 && indices.every(i => strings[i] < 0.5)) {
+                            damagedBlocks.push(`Tarjeta ${cardId} (Strings ${indices[0] + 1}-${indices[indices.length - 1] + 1})`);
                         }
-                    }
-                    // Check final block
-                    if (consecutiveCount >= 4) {
-                        damagedBlocks.push(`Strings ${startIdx + 1}-${startIdx + consecutiveCount}`);
                     }
 
                     if (damagedBlocks.length > 0) {

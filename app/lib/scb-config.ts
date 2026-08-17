@@ -7,7 +7,7 @@
 // - Inversor: 1 o 2 (Donde 2 incluye las cajas de 19-36 del API)
 // - SCB: 1 a 18 (Para Inversor 2, SCB 19 es 1)
 
-const FIFTEEN_STRING_SCBS = new Set([
+export const FIFTEEN_STRING_SCB_KEYS = [
     'PS1-2-8', 'PS1-2-9',
     'PS2-2-1', 'PS2-2-4',
     'PS3-2-15', 'PS3-2-18',
@@ -22,7 +22,9 @@ const FIFTEEN_STRING_SCBS = new Set([
     'PS12-1-11', 'PS12-2-1', 'PS12-2-4', 'PS12-2-5',
     'PS13-1-13', 'PS13-2-1', 'PS13-2-13', 'PS13-2-14',
     'PS14-1-13', 'PS14-1-14', 'PS14-1-15', 'PS14-1-18', 'PS14-2-12', 'PS14-2-18'
-]);
+] as const;
+
+const FIFTEEN_STRING_SCBS = new Set<string>(FIFTEEN_STRING_SCB_KEYS);
 
 /**
  * Verifica si una SCB específica tiene configuración de 15 strings.
@@ -53,4 +55,40 @@ export function is15StringScb(ps: string, inversor: number, scb: number): boolea
  */
 export function getScbCapacity(ps: string, inversor: number, scb: number): number {
     return is15StringScb(ps, inversor, scb) ? 15 : 18;
+}
+
+/**
+ * Convierte un MID físico Modbus (1-36) en su (inversor, scb) lógico.
+ *
+ * Replica la lógica del driver Rust (`core::types::get_logical_mapping`) y aplica
+ * además la normalización que ya usan /api/stats, /api/ps y /api/heatmap
+ * (inversor 1 con scb > 18 => inversor 2). Así las predicciones IA quedan con el
+ * mismo (inversor, scb) que ve el resto del dashboard.
+ *
+ * @param ps  Identificador de la planta (ej: "PS1")
+ * @param mid MID físico Modbus (1-36)
+ */
+export function getLogicalScb(ps: string, mid: number): { inversor: number; scb: number } {
+    const normPs = ps.replace(/\s+/g, "").toUpperCase();
+    let inversor = 1;
+    let scb = mid;
+
+    // Caso especial PS1 (idéntico a get_logical_mapping en el driver)
+    if (normPs === "PS1" || normPs === "GWGIRASOLPS1") {
+        if (mid >= 19 && mid <= 26) {
+            inversor = 2;
+            scb = mid - 8; // 19 -> 11 ... 26 -> 18
+        } else if (mid >= 27 && mid <= 36) {
+            inversor = 2;
+            scb = mid - 26; // 27 -> 1 ... 36 -> 10
+        }
+    }
+
+    // Normalización general (PS2-PS14): inversor 1 con scb > 18 => inversor 2
+    if (inversor === 1 && scb > 18) {
+        inversor = 2;
+        scb -= 18;
+    }
+
+    return { inversor, scb };
 }

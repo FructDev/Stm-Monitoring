@@ -160,10 +160,8 @@ export default function MeteoPage() {
         return numA - numB;
     });
 
-    console.log("[MeteoPage Debug] meteoData keys:", Object.keys(meteoData).length, meteoData);
-
     return (
-        <div className="p-6 max-w-[1600px] mx-auto space-y-6">
+        <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-6">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
                     <h1 className="text-2xl font-black text-slate-100 uppercase tracking-tight flex items-center gap-3">
